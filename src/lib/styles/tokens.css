@@ -1,0 +1,138 @@
+/* Offspring design tokens — ElevenLabs-inspired composition with our blue accent.
+   Funnel Display (weight 300) for the primary display face, Funnel Sans
+   (400/500) for body/UI. Same warm-stone signature surface, whisper shadows
+   and pill radii from the ElevenLabs reference, but the signature accent is
+   our #2196F3 blue (the app-icon glass), not black.
+
+   Older variable names are kept as aliases so existing components stay
+   painted correctly without churn. */
+
+@import url("https://fonts.googleapis.com/css2?family=Funnel+Display:wght@300;400;500;600;700&family=Funnel+Sans:wght@300;400;500;600;700&family=Inconsolata:wght@400;500&display=swap");
+
+:root {
+  /* ---- Core palette --------------------------------------------------- */
+  /* Signature surfaces: bright canvas + warm stone for the "signature" chip */
+  --c-canvas:         #FFFFFF;
+  --c-canvas-muted:   #F5F5F5;   /* secondary canvas, subtle step-down */
+  --c-stone:          rgba(245, 242, 239, 0.8);  /* warm stone, semi-transparent */
+  --c-stone-solid:    #F5F2EF;   /* opaque fallback */
+
+  /* Accent — Offspring blue, replaces ElevenLabs' stark black */
+  --c-primary:        #2196F3;   /* vivid icon blue */
+  --c-primary-hover:  #1976D2;
+  --c-primary-press:  #1565C0;
+  --c-primary-ring:   rgba(33, 150, 243, 0.24);
+  --c-primary-tint:   #E3F2FD;   /* wash for selected rows */
+  --c-primary-contrast: #FFFFFF;
+
+  /* Neutrals */
+  --c-surface:        var(--c-canvas);
+  --c-surface-2:      var(--c-canvas-muted);
+  --c-surface-3:      #EDEDED;
+  --c-text:           #0B0B0B;   /* near-black */
+  --c-text-2:         #2F2F2F;
+  --c-text-3:         #6B6B6B;
+  --c-text-4:         #9A9A9A;
+  --c-border:         rgba(17, 17, 17, 0.08);
+  --c-border-strong:  rgba(17, 17, 17, 0.14);
+  --c-focus:          var(--c-primary);
+
+  /* Secondary signals */
+  --c-secondary:      #8B5CF6;
+  --c-success:        #16A34A;
+  --c-warning:        #D97706;
+  --c-danger:         #DC2626;
+
+  /* ---- Compatibility aliases (previous token names) ------------------- */
+  --c-parchment:      var(--c-surface-2);
+  --c-ivory:          var(--c-surface);
+  --c-white:          var(--c-surface);
+  --c-warm-sand:      var(--c-stone-solid);
+  --c-dark-surface:   #1F2937;
+  --c-deep-dark:      #0F172A;
+  --c-text-secondary: var(--c-text-2);
+  --c-text-tertiary:  var(--c-text-3);
+  --c-text-button:    var(--c-text-2);
+  --c-text-emphasis:  var(--c-text);
+  --c-border-warm:    var(--c-border);
+  --c-border-dark:    var(--c-border-strong);
+  --ring-warm:        var(--c-border);
+  --ring-deep:        var(--c-border-strong);
+  --c-brand:          var(--c-primary);
+  --c-brand-hover:    var(--c-primary-hover);
+  --c-coral:          var(--c-secondary);
+  --c-error:          var(--c-danger);
+
+  /* ---- Typography ----------------------------------------------------- */
+  /* Funnel Display for display/headlines (weight 300 hero, 500 for UI display).
+     Funnel Sans for body/UI. Inconsolata for code. Positive letter-spacing
+     inherited from the ElevenLabs system for an airy, precise feel. */
+  --font-sans:    "Funnel Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-display: "Funnel Display", "Funnel Sans", system-ui, sans-serif;
+  --font-mono:    "Inconsolata", ui-monospace, "Cascadia Mono", Consolas, monospace;
+  --font-serif:   var(--font-display); /* legacy alias */
+
+  /* Letter-spacing — the ElevenLabs signature is a slight +track on display */
+  --tracking-display: 0.18px;
+  --tracking-body:    0.14px;
+  --tracking-tight:   0px;
+
+  /* Type scale */
+  --fs-11: 11px;
+  --fs-12: 12px;
+  --fs-13: 13px;
+  --fs-14: 14px;
+  --fs-15: 15px;
+  --fs-16: 16px;
+  --fs-18: 18px;
+  --fs-20: 20px;
+  --fs-24: 24px;
+  --fs-32: 32px;
+  --fs-40: 40px;
+
+  /* ---- Radii — pills dominate UI, soft radii for surfaces ------------- */
+  --r-sm:    4px;
+  --r-md:    6px;
+  --r-lg:    8px;
+  --r-xl:    12px;
+  --r-2xl:   16px;
+  --r-pill:  9999px;
+
+  /* ---- Elevation — multi-layer whispers at sub-0.1 opacity ------------ */
+  --shadow-ring:      inset 0 0 0 1px var(--c-border);
+  --shadow-ring-deep: inset 0 0 0 1px var(--c-border-strong);
+  /* "Whisper" — barely-there stacked shadow for floating chips / popovers */
+  --shadow-whisper:
+      0 1px 1px rgba(17, 17, 17, 0.03),
+      0 1px 2px rgba(17, 17, 17, 0.04),
+      0 2px 6px rgba(17, 17, 17, 0.04);
+  /* Warm shadow — for stone-tinted surfaces */
+  --shadow-warm:
+      0 1px 2px rgba(78, 50, 23, 0.04),
+      0 2px 8px rgba(78, 50, 23, 0.05);
+  --shadow-pop:
+      0 6px 20px rgba(17, 17, 17, 0.08),
+      0 12px 40px rgba(17, 17, 17, 0.06);
+  /* Primary-tinted focus ring */
+  --shadow-focus:     0 0 0 3px var(--c-primary-ring);
+
+  /* ---- Spacing (8pt baseline) ----------------------------------------- */
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-5: 20px;
+  --sp-6: 24px;
+  --sp-8: 32px;
+  --sp-10: 40px;
+  --sp-12: 48px;
+
+  /* ---- Touch target minimum ------------------------------------------- */
+  --tap-min: 32px; /* compact desktop baseline */
+
+  /* ---- Motion --------------------------------------------------------- */
+  --ease-standard: cubic-bezier(0.2, 0, 0, 1);
+  --dur-fast:    120ms;
+  --dur-base:    180ms;
+  --dur-slow:    260ms;
+}
