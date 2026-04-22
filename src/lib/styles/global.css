@@ -1,0 +1,210 @@
+@import "./tokens.css";
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  background: var(--c-surface);
+  color: var(--c-text);
+  font-family: var(--font-sans);
+  font-size: var(--fs-14);
+  line-height: 1.45;
+  letter-spacing: var(--tracking-body);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+}
+
+/* ---- Display typography — Funnel Display, airy weight, +track ------- */
+h1, h2, h3, h4 {
+  font-family: var(--font-display);
+  font-weight: 300;           /* ElevenLabs-signature airy weight */
+  margin: 0;
+  letter-spacing: var(--tracking-display);
+  color: var(--c-text);
+  line-height: 1.12;
+}
+h1 { font-size: var(--fs-32); font-weight: 300; }
+h2 { font-size: var(--fs-24); font-weight: 400; }
+h3 { font-size: var(--fs-18); font-weight: 500; letter-spacing: var(--tracking-body); }
+h4 { font-size: var(--fs-14); font-weight: 600; letter-spacing: var(--tracking-body); }
+
+p { margin: 0; }
+
+code, kbd, samp, pre {
+  font-family: var(--font-mono);
+  font-size: 0.92em;
+  letter-spacing: 0;
+}
+
+/* ---- Buttons — pill radius, quiet border, bright-blue primary ------- */
+button {
+  font-family: var(--font-sans);
+  font-size: var(--fs-13);
+  font-weight: 500;
+  letter-spacing: var(--tracking-body);
+  border: 1px solid var(--c-border);
+  background: var(--c-stone);
+  color: var(--c-text-2);
+  cursor: pointer;
+  padding: 6px 14px;
+  min-height: var(--tap-min);
+  border-radius: var(--r-pill);
+  box-shadow: var(--shadow-warm);
+  transition:
+    background var(--dur-fast) var(--ease-standard),
+    border-color var(--dur-fast) var(--ease-standard),
+    color var(--dur-fast) var(--ease-standard),
+    box-shadow var(--dur-fast) var(--ease-standard),
+    transform var(--dur-fast) var(--ease-standard);
+}
+button:hover {
+  background: var(--c-stone-solid);
+  border-color: var(--c-border-strong);
+  color: var(--c-text);
+}
+button:focus-visible {
+  outline: none;
+  box-shadow: var(--shadow-focus), var(--shadow-warm);
+  border-color: var(--c-primary);
+}
+button:active { transform: translateY(0.5px); }
+button:disabled { opacity: 0.5; cursor: not-allowed; box-shadow: none; }
+
+button.primary {
+  background: var(--c-primary);
+  border-color: var(--c-primary);
+  color: var(--c-primary-contrast);
+  box-shadow:
+    0 1px 2px rgba(33, 150, 243, 0.20),
+    0 2px 8px rgba(33, 150, 243, 0.18);
+}
+button.primary:hover {
+  background: var(--c-primary-hover);
+  border-color: var(--c-primary-hover);
+  color: var(--c-primary-contrast);
+}
+button.primary:active { background: var(--c-primary-press); }
+
+button.ghost {
+  background: transparent;
+  border-color: transparent;
+  color: var(--c-text-3);
+  box-shadow: none;
+}
+button.ghost:hover {
+  background: var(--c-canvas-muted);
+  color: var(--c-text);
+}
+
+button.danger {
+  background: var(--c-surface);
+  border-color: var(--c-border);
+  color: var(--c-danger);
+  box-shadow: var(--shadow-warm);
+}
+button.danger:hover {
+  background: #FEF2F2;
+  border-color: #FECACA;
+  color: var(--c-danger);
+}
+
+/* ---- Inputs — soft rounded, blue focus ring -------------------------- */
+input, select, textarea {
+  font-family: var(--font-sans);
+  font-size: var(--fs-13);
+  letter-spacing: var(--tracking-body);
+  color: var(--c-text);
+  background: var(--c-surface);
+  border: 1px solid var(--c-border);
+  border-radius: var(--r-md);
+  padding: 6px 10px;
+  min-height: var(--tap-min);
+  outline: none;
+  transition:
+    border-color var(--dur-fast) var(--ease-standard),
+    box-shadow var(--dur-fast) var(--ease-standard);
+  width: 100%;
+}
+input:focus, select:focus, textarea:focus {
+  border-color: var(--c-primary);
+  box-shadow: var(--shadow-focus);
+}
+input[type="checkbox"], input[type="radio"] {
+  width: auto;
+  min-height: 0;
+  accent-color: var(--c-primary);
+}
+
+label {
+  display: block;
+  font-size: var(--fs-12);
+  font-weight: 500;
+  color: var(--c-text-3);
+  margin-bottom: 3px;
+  letter-spacing: 0.01em;
+}
+
+/* ---- Cards / panels — whisper shadow, soft radius -------------------- */
+.card {
+  background: var(--c-surface);
+  border: 1px solid var(--c-border);
+  border-radius: var(--r-lg);
+  padding: var(--sp-3);
+  box-shadow: var(--shadow-whisper);
+}
+
+.muted { color: var(--c-text-3); }
+.tiny  {
+  font-size: var(--fs-12);
+  color: var(--c-text-3);
+  letter-spacing: 0.02em;
+}
+
+.row { display: flex; align-items: center; gap: var(--sp-2); }
+.col { display: flex; flex-direction: column; gap: var(--sp-2); }
+
+/* ---- Badges — pill, neutral-by-default ------------------------------- */
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 10px;
+  border-radius: var(--r-pill);
+  font-size: var(--fs-12);
+  font-weight: 500;
+  letter-spacing: var(--tracking-body);
+  background: var(--c-stone);
+  color: var(--c-text-2);
+  border: 1px solid var(--c-border);
+}
+.badge.ok   { color: var(--c-success); background: #ECFDF5; border-color: #A7F3D0; }
+.badge.warn { color: var(--c-danger);  background: #FEF2F2; border-color: #FECACA; }
+
+/* ---- Status dot ------------------------------------------------------ */
+.dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+.dot.ok   { background: var(--c-success); }
+.dot.warn { background: var(--c-danger); }
+
+/* ---- Scrollbars (subtle) --------------------------------------------- */
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-thumb {
+  background: var(--c-border-strong);
+  border-radius: var(--r-pill);
+  border: 2px solid var(--c-surface);
+}
+::-webkit-scrollbar-thumb:hover { background: var(--c-text-4); }
+::-webkit-scrollbar-track { background: transparent; }
+
+/* ---- Selection ------------------------------------------------------- */
+::selection {
+  background: var(--c-primary-tint);
+  color: var(--c-text);
+}
+
+/* ---- Reduced motion -------------------------------------------------- */
+@media (prefers-reduced-motion: reduce) {
+  * { transition: none !important; animation: none !important; }
+}
