@@ -16,7 +16,7 @@ to your right-click menu. Drop a `.mov` on a shortcut, get a trimmed-down
 command lines, no upload to a web service.
 
 <p align="center">
-  <img src="docs/screenshots/main.png" alt="Offspring main window — preset list and Discord GIF settings" width="760" />
+  <img src="docs/screenshots/contextmenu.png" alt="Right-click menu with Offspring preset entries" width="420" />
 </p>
 
 ## What it does
@@ -32,6 +32,10 @@ command lines, no upload to a web service.
   own crop, max file size, palette, and dither for GIFs.
 - Streams per-file progress in a small always-on-top window while
   FFmpeg does the work.
+
+<p align="center">
+  <img src="docs/screenshots/main.png" alt="Offspring main window — preset list and Discord GIF settings" width="760" />
+</p>
 
 <p align="center">
   <img src="docs/screenshots/encoding.png" alt="Encoding progress window" width="420" />
