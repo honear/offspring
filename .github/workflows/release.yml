@@ -74,6 +74,30 @@ jobs:
       - name: Build app (tauri build)
         run: npm run tauri build
 
+      - name: Build shell-extension DLL
+        # Phase 3 crate — produces offspring_shell_ext.dll which the MSIX
+        # references via its manifest. The release-time dll ends up in
+        # shell-ext/target/release/ (or CARGO_TARGET_DIR/release if the
+        # workspace ever starts sharing a target dir).
+        shell: pwsh
+        run: |
+          cd shell-ext
+          cargo build --release
+          Get-Item target/release/offspring_shell_ext.dll
+
+      - name: Stage shell-ext DLL next to offspring.exe
+        # Both artifacts need to live in the install directory at
+        # Add-AppxPackage time. Copying it alongside offspring.exe now
+        # means the Inno [Files] section picks it up automatically.
+        shell: pwsh
+        run: Copy-Item shell-ext/target/release/offspring_shell_ext.dll src-tauri/target/release/ -Force
+
+      - name: Build + sign MSIX sparse package
+        shell: pwsh
+        run: |
+          $version = "${{ steps.ver.outputs.version }}.0"
+          pwsh installer/msix/build-msix.ps1 -Version $version
+
       - name: Install Inno Setup
         run: choco install innosetup --no-progress -y
 

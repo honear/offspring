@@ -1,0 +1,104 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Sparse MSIX manifest for the Offspring Windows 11 modern right-click
+  menu handler.
+
+  "Sparse" means:
+    * Content (offspring.exe, offspring_shell_ext.dll, icons) lives at
+      the path passed to `Add-AppxPackage -ExternalLocation <...>`.
+    * The MSIX file itself carries only this manifest + a small assets
+      folder used for the appx registration UI.
+
+  The CLSID below MUST match shell-ext/src/lib.rs (ROOT_CLSID). If you
+  change one, change both and `Remove-AppxPackage` the old identity.
+
+  Identity Name / Publisher are what Add-AppxPackage matches on — the
+  cert CN must match Publisher exactly, and changing either field
+  requires users to reinstall (Windows treats it as a new package).
+-->
+<Package
+  xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
+  xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
+  xmlns:uap3="http://schemas.microsoft.com/appx/manifest/uap/windows10/3"
+  xmlns:uap10="http://schemas.microsoft.com/appx/manifest/uap/windows10/10"
+  xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
+  xmlns:com="http://schemas.microsoft.com/appx/manifest/com/windows10"
+  xmlns:desktop4="http://schemas.microsoft.com/appx/manifest/desktop/windows10/4"
+  xmlns:desktop5="http://schemas.microsoft.com/appx/manifest/desktop/windows10/5"
+  IgnorableNamespaces="uap uap3 uap10 rescap com desktop4 desktop5">
+
+  <Identity
+    Name="SecondMarch.Offspring.ShellExt"
+    Publisher="CN=Second March"
+    Version="0.2.0.0"
+    ProcessorArchitecture="x64" />
+
+  <Properties>
+    <DisplayName>Offspring Shell Extension</DisplayName>
+    <PublisherDisplayName>Second March</PublisherDisplayName>
+    <Logo>Assets\StoreLogo.png</Logo>
+    <!-- Lets the package reference files (including the DLL) from the
+         install directory passed via -ExternalLocation. -->
+    <uap10:AllowExternalContent>true</uap10:AllowExternalContent>
+  </Properties>
+
+  <Dependencies>
+    <!-- 19041 = 20H1; earliest Windows 10 build that supports MSIX
+         sparse packages + the fileExplorerContextMenus extension. -->
+    <TargetDeviceFamily Name="Windows.Desktop" MinVersion="10.0.19041.0" MaxVersionTested="10.0.22621.0" />
+  </Dependencies>
+
+  <Resources>
+    <Resource Language="en-us" />
+  </Resources>
+
+  <Applications>
+    <Application
+      Id="OffspringShellExt"
+      Executable="offspring.exe"
+      EntryPoint="Windows.FullTrustApplication">
+      <uap:VisualElements
+        DisplayName="Offspring"
+        Description="Right-click video/image conversion presets powered by FFmpeg"
+        BackgroundColor="transparent"
+        Square150x150Logo="Assets\Square150x150Logo.png"
+        Square44x44Logo="Assets\Square44x44Logo.png"
+        AppListEntry="none">
+        <uap:DefaultTile Wide310x150Logo="Assets\Square150x150Logo.png" />
+      </uap:VisualElements>
+
+      <Extensions>
+        <!-- Register the in-proc COM server (our DLL). Threading model
+             STA is required for shell extensions that touch UI. -->
+        <com:Extension Category="windows.comServer">
+          <com:ComServer>
+            <com:SurrogateServer DisplayName="Offspring Command">
+              <com:Class
+                Id="4A8F1E2B-6C9D-4E1F-8A2B-3C4D5E6F7A8B"
+                Path="offspring_shell_ext.dll"
+                ThreadingModel="STA" />
+            </com:SurrogateServer>
+          </com:ComServer>
+        </com:Extension>
+
+        <!-- Attach that CLSID to the Windows 11 modern right-click menu
+             for every file type. Children (preset verbs) are driven
+             dynamically by the DLL via IEnumExplorerCommand — nothing
+             to list here. -->
+        <desktop4:Extension Category="windows.fileExplorerContextMenus">
+          <desktop4:FileExplorerContextMenus>
+            <desktop5:ItemType Type="*">
+              <desktop5:Verb
+                Id="OffspringRoot"
+                Clsid="4A8F1E2B-6C9D-4E1F-8A2B-3C4D5E6F7A8B" />
+            </desktop5:ItemType>
+          </desktop4:FileExplorerContextMenus>
+        </desktop4:Extension>
+      </Extensions>
+    </Application>
+  </Applications>
+
+  <Capabilities>
+    <rescap:Capability Name="runFullTrust" />
+  </Capabilities>
+</Package>
