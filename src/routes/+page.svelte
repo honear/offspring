@@ -42,6 +42,21 @@
     message: string | null;
   }>({ phase: "idle", percent: null, message: null });
 
+  // Manual "Check for updates" button state. `checking` drives the
+  // spinner, `lastChecked` is the wall-clock time of the most recent
+  // successful check, and `manualResult` is a one-shot status line
+  // ("You're on the latest version.") shown after a manual check even
+  // when no update is available. `currentVersion` is filled by the
+  // first `check_for_updates` call — even a network-failed check
+  // populates it from `CARGO_PKG_VERSION`, so we always have something
+  // to display.
+  let updateCheck = $state<{
+    checking: boolean;
+    lastChecked: number | null;
+    manualResult: string | null;
+  }>({ checking: false, lastChecked: null, manualResult: null });
+  let currentVersion = $state<string>("");
+
   const selected = $derived(presets.find((p) => p.id === selectedId) ?? null);
 
   onMount(async () => {
@@ -101,37 +116,63 @@
     }
   }
 
-  async function checkUpdate() {
-    // Respect an in-session dismiss for this specific version so closing the
-    // banner stays closed until the app is relaunched (or a newer version
-    // lands).
-    const dismissedFor = sessionStorage.getItem(UPDATE_DISMISS_KEY);
+  async function checkUpdate(opts: { manual?: boolean } = {}) {
+    // Respect an in-session dismiss for this specific version so closing
+    // the banner stays closed until the app is relaunched (or a newer
+    // version lands). A manual re-check from Settings bypasses this —
+    // if the user explicitly asks, honour it.
+    const dismissedFor = opts.manual
+      ? null
+      : sessionStorage.getItem(UPDATE_DISMISS_KEY);
 
-    // Warm-start from cache so the banner renders without a round-trip when
-    // navigating between routes (progress → main, etc).
-    const cached = sessionStorage.getItem(UPDATE_CACHE_KEY);
-    if (cached) {
-      try {
-        const parsed = JSON.parse(cached) as UpdateInfo;
-        if (parsed.update_available && dismissedFor !== parsed.latest) {
-          update = parsed;
-          maybeStartDownload(parsed);
-        }
-      } catch {}
+    // Warm-start from cache so the banner renders without a round-trip
+    // when navigating between routes (progress → main, etc). Skipped on
+    // manual checks — the user wants a fresh answer.
+    if (!opts.manual) {
+      const cached = sessionStorage.getItem(UPDATE_CACHE_KEY);
+      if (cached) {
+        try {
+          const parsed = JSON.parse(cached) as UpdateInfo;
+          if (parsed.current) currentVersion = parsed.current;
+          if (parsed.update_available && dismissedFor !== parsed.latest) {
+            update = parsed;
+            maybeStartDownload(parsed);
+          }
+        } catch {}
+      }
     }
 
+    if (opts.manual) {
+      updateCheck.checking = true;
+      updateCheck.manualResult = null;
+    }
     try {
       const info = await api.checkForUpdates();
       sessionStorage.setItem(UPDATE_CACHE_KEY, JSON.stringify(info));
+      if (info.current) currentVersion = info.current;
+      updateCheck.lastChecked = Date.now();
       if (info.update_available && dismissedFor !== info.latest) {
         update = info;
         maybeStartDownload(info);
+        if (opts.manual) {
+          updateCheck.manualResult = `Version ${info.latest} is available.`;
+        }
       } else {
         update = null;
+        if (opts.manual) {
+          updateCheck.manualResult = info.latest
+            ? `You're on the latest version (${info.current}).`
+            : `Couldn't reach the update server. Try again later.`;
+        }
       }
     } catch {
-      // Network fail = stay quiet. The worst user outcome here is "you
-      // didn't know about an update yet", which is fine.
+      // Network fail = stay quiet on the automatic path. On a manual
+      // check the user asked, so surface it.
+      if (opts.manual) {
+        updateCheck.manualResult = "Couldn't reach the update server. Try again later.";
+      }
+    } finally {
+      if (opts.manual) updateCheck.checking = false;
     }
   }
 
@@ -611,6 +652,21 @@
             take effect after the next sign-out.
           </p>
         </div>
+      </div>
+
+      <div class="card">
+        <h3>Updates</h3>
+        <p class="muted tiny">
+          Current version: <strong>{currentVersion || "…"}</strong>
+        </p>
+        <div class="row" style="margin-top: 12px;">
+          <button onclick={() => checkUpdate({ manual: true })} disabled={updateCheck.checking}>
+            {updateCheck.checking ? "Checking…" : "Check for updates"}
+          </button>
+        </div>
+        {#if updateCheck.manualResult}
+          <p class="tiny muted" style="margin-top: 8px;">{updateCheck.manualResult}</p>
+        {/if}
       </div>
 
       <div class="card">
