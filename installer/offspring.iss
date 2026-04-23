@@ -10,7 +10,7 @@
 ; Compile with the Inno Setup compiler (iscc.exe or the Inno Setup IDE).
 
 #define AppName      "Offspring"
-#define AppVersion   "0.3.1"
+#define AppVersion   "0.3.2"
 #define AppPublisher "Rolando Barry"
 #define AppExeName   "offspring.exe"
 #define AppId        "{{D8E5C6BC-5F10-4B29-A8A9-7D4D1A3B9C22}"
@@ -40,12 +40,15 @@ Compression=lzma2/ultra
 SolidCompression=yes
 ArchitecturesInstallIn64BitMode=x64compatible
 ArchitecturesAllowed=x64compatible
-PrivilegesRequired=lowest
-PrivilegesRequiredOverridesAllowed=dialog
+; Require admin so: (1) every install lands in the same scope (no more
+; stacked per-user + admin copies), and (2) the shell-extension cert
+; trust step below can populate LocalMachine\TrustedPeople, which is
+; what Add-AppxPackage validates the MSIX signature against. Users
+; without admin can't install — acceptable for this app's audience.
+PrivilegesRequired=admin
 WizardStyle=modern
 DisableProgramGroupPage=yes
 DisableDirPage=auto
-; Start Menu + uninstaller automatically under LOCALAPPDATA when non-admin
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
@@ -78,12 +81,10 @@ Filename: "powershell.exe"; \
     Flags: runhidden waituntilterminated
 ; Trust the shell-extension signing cert machine-wide so the modern-menu
 ; toggle's Add-AppxPackage call doesn't fail with 0x800B0109 (untrusted
-; root). Requires elevation — skipped on per-user installs, in which case
-; the modern-menu toggle will surface a clear error when flipped on.
+; root). Installer is admin-only, so no privilege check needed.
 Filename: "powershell.exe"; \
     Parameters: "-NoProfile -ExecutionPolicy Bypass -Command ""if (Test-Path '{app}\OffspringShellExt.cer') {{ Import-Certificate -FilePath '{app}\OffspringShellExt.cer' -CertStoreLocation Cert:\LocalMachine\TrustedPeople | Out-Null }}"""; \
     StatusMsg: "Trusting shell-extension certificate..."; \
-    Check: IsAdminInstallMode; \
     Flags: runhidden waituntilterminated
 ; Seed default presets + populate SendTo shortcuts
 Filename: "{app}\{#AppExeName}"; \
