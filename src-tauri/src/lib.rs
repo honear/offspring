@@ -6,6 +6,7 @@ mod ffmpeg;
 mod paths;
 mod presets;
 mod sendto;
+mod updates;
 
 use clap::Parser;
 use cli::{Cli, Command};
@@ -51,6 +52,7 @@ pub fn run() {
             commands::get_pending_preset_id,
             commands::get_pending_custom_preset,
             commands::prepare_custom_encode,
+            updates::check_for_updates,
         ])
         .setup(move |app| {
             let handle = app.handle().clone();

@@ -45,3 +45,16 @@ export interface ProgressEvent {
   percent: number | null;
   message: string | null;
 }
+
+export interface UpdateInfo {
+  /** Running version, e.g. "0.2.0". */
+  current: string;
+  /** Latest published version, or "" if the check couldn't resolve one. */
+  latest: string;
+  /** True iff `latest` is strictly greater than `current`. */
+  update_available: boolean;
+  /** GitHub release page. Opened in the default browser on click. */
+  html_url: string;
+  /** Direct .exe download URL, or "" if no matching asset was found. */
+  installer_url: string;
+}
