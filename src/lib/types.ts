@@ -30,6 +30,14 @@ export interface Settings {
   verbosity?: string | null;
   pause_after?: boolean | null;
   descriptive_names?: boolean | null;
+  /** Mirror presets into the user's Windows SendTo folder. Off by default
+   *  — the registry right-click menu covers the same use-case and is more
+   *  discoverable on Windows 11. */
+  sendto_enabled?: boolean | null;
+  /** Surface Offspring in the Windows 11 _top-level_ right-click menu via
+   *  an MSIX sparse package. Off by default; flipping on prompts the user
+   *  to trust our self-signed cert. */
+  modern_menu_enabled?: boolean | null;
 }
 
 export interface FfmpegStatus {

@@ -433,11 +433,48 @@
       </div>
 
       <div class="card">
+        <h3>Right-click menu</h3>
+        <p class="muted tiny">
+          Offspring always adds a submenu under Windows 11's "Show more options" (the classic right-click menu).
+          These toggles control the two extra surfaces.
+        </p>
+        <div style="margin-top: 12px; display: flex; flex-direction: column; gap: 10px;">
+          <label class="inline">
+            <input
+              type="checkbox"
+              checked={settings.sendto_enabled ?? false}
+              onchange={(e) => {
+                settings.sendto_enabled = (e.currentTarget as HTMLInputElement).checked;
+                saveSettings();
+              }}
+            />
+            <span>Also add entries to the <strong>Send to</strong> menu</span>
+          </label>
+          <label class="inline">
+            <input
+              type="checkbox"
+              checked={settings.modern_menu_enabled ?? false}
+              onchange={(e) => {
+                settings.modern_menu_enabled = (e.currentTarget as HTMLInputElement).checked;
+                saveSettings();
+              }}
+            />
+            <span>Integrate with the <strong>Windows 11 modern right-click menu</strong> (top-level, no extra click)</span>
+          </label>
+          <p class="tiny muted" style="margin: 0; padding-left: 22px;">
+            Enabling the modern menu registers a sparse MSIX package signed with our self-signed developer
+            certificate. Windows will prompt you once to trust it — click "Trust" or "Install" on that dialog.
+            Turning the toggle off unregisters the package cleanly.
+          </p>
+        </div>
+      </div>
+
+      <div class="card">
         <h3>Data folder</h3>
         <p class="muted tiny">Presets and settings live under <code>%APPDATA%\Offspring</code>.</p>
         <div class="row" style="margin-top: 12px;">
           <button onclick={api.openDataFolder}>Open folder</button>
-          <button onclick={api.syncSendto}>Re-sync SendTo menu</button>
+          <button onclick={api.syncIntegrations}>Re-sync right-click menus</button>
         </div>
       </div>
     </section>
@@ -446,6 +483,20 @@
 
 <style>
   .shell { display: flex; flex-direction: column; height: 100vh; }
+
+  label.inline {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    font-size: var(--fs-13, 13px);
+    color: var(--c-text);
+    margin: 0;
+    cursor: pointer;
+  }
+  label.inline input[type="checkbox"] {
+    margin-top: 2px;
+    flex-shrink: 0;
+  }
 
   .update-banner {
     display: flex;
