@@ -16,6 +16,7 @@
 use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
+use std::os::windows::process::CommandExt;
 use std::path::PathBuf;
 use std::time::Duration;
 use tauri::{AppHandle, Emitter};
@@ -158,9 +159,14 @@ pub fn download_update(app: AppHandle, version: String, installer_url: String) -
 }
 
 /// Launch the previously-downloaded installer for `version` and exit the
-/// app so Inno Setup can overwrite `offspring.exe`. Inno's
-/// `/RESTARTAPPLICATIONS` re-launches us after the swap. If no matching
-/// downloaded file exists, returns an error and does NOT exit.
+/// app so Inno Setup can overwrite `offspring.exe`. A detached PowerShell
+/// watcher waits for the installer process to exit, then relaunches the
+/// freshly-installed exe. If no matching downloaded file exists, returns
+/// an error and does NOT exit.
+///
+/// We deliberately don't pass Inno's `/RESTARTAPPLICATIONS` — it only
+/// works for applications registered with Windows Restart Manager
+/// (Tauri apps aren't, by default) and silently no-ops otherwise.
 #[tauri::command]
 pub fn install_update(version: String) -> Result<(), String> {
     let path = installer_path(&version).map_err(|e| e.to_string())?;
@@ -171,24 +177,39 @@ pub fn install_update(version: String) -> Result<(), String> {
         ));
     }
 
-    // /VERYSILENT — no UI. /CLOSEAPPLICATIONS — gracefully close the
-    // running exe (that's us, about to exit). /RESTARTAPPLICATIONS — re-open
-    // us once the swap is done. /NORESTART — never reboot the machine,
-    // Inno only does that if something low-level changed (shouldn't apply
-    // here but belt-and-braces).
-    std::process::Command::new(&path)
-        .args([
-            "/VERYSILENT",
-            "/CLOSEAPPLICATIONS",
-            "/RESTARTAPPLICATIONS",
-            "/NORESTART",
-        ])
+    // /VERYSILENT — no UI. /NORESTART — never reboot the machine.
+    // /SUPPRESSMSGBOXES — pair with /SILENT to swallow any "another
+    // instance is running" prompts if the restart-app handshake misfires.
+    let child = std::process::Command::new(&path)
+        .args(["/VERYSILENT", "/NORESTART", "/SUPPRESSMSGBOXES"])
         .spawn()
         .map_err(|e| format!("spawning installer: {e}"))?;
+    let installer_pid = child.id();
 
-    // Give the installer a beat to grab its lock before we release ours.
-    // Without this the /CLOSEAPPLICATIONS handshake races against our exit
-    // and Inno sometimes decides it doesn't need to restart us.
+    // Post-swap relaunch. We spawn a detached PowerShell that:
+    //   1. Waits on the installer PID so it only fires after Inno is done.
+    //   2. Sleeps a second so the new exe file handle is fully released.
+    //   3. Start-Process the freshly-installed offspring.exe.
+    // Launched with CREATE_NO_WINDOW | DETACHED_PROCESS so it survives
+    // our own exit and never flashes a console window.
+    let exe = std::env::current_exe()
+        .map_err(|e| format!("locating current exe: {e}"))?;
+    let exe_str = exe.display().to_string().replace('\'', "''");
+    let ps_cmd = format!(
+        "Wait-Process -Id {installer_pid} -ErrorAction SilentlyContinue; \
+         Start-Sleep -Seconds 1; \
+         Start-Process -FilePath '{exe_str}'"
+    );
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    const DETACHED_PROCESS: u32 = 0x0000_0008;
+    std::process::Command::new("powershell.exe")
+        .args(["-NoProfile", "-WindowStyle", "Hidden", "-Command", &ps_cmd])
+        .creation_flags(CREATE_NO_WINDOW | DETACHED_PROCESS)
+        .spawn()
+        .map_err(|e| format!("spawning relaunch watcher: {e}"))?;
+
+    // Give the installer a beat to acquire its lock before we release
+    // ours and exit.
     std::thread::sleep(Duration::from_millis(500));
     std::process::exit(0);
 }
