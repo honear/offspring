@@ -3,14 +3,15 @@ mod cli;
 mod commands;
 mod defaults;
 mod ffmpeg;
+mod integration;
 mod paths;
 mod presets;
-mod sendto;
 mod updates;
 
 use clap::Parser;
 use cli::{Cli, Command};
 use commands::{AppHandleExt, PendingState};
+use integration::{context_menu, sendto};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -21,10 +22,12 @@ pub fn run() {
         Some(Command::FirstRun) => {
             let ps = presets::load_presets().unwrap_or_else(|_| defaults::default_presets());
             let _ = presets::save_presets(&ps);
+            let _ = context_menu::sync(&ps);
             let _ = sendto::sync(&ps);
             return;
         }
         Some(Command::Cleanup) => {
+            let _ = context_menu::cleanup();
             let _ = sendto::cleanup();
             return;
         }
@@ -63,6 +66,7 @@ pub fn run() {
                 if !path.exists() {
                     let ps = defaults::default_presets();
                     let _ = presets::save_presets(&ps);
+                    let _ = context_menu::sync(&ps);
                     let _ = sendto::sync(&ps);
                 }
             }
