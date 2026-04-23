@@ -47,6 +47,7 @@ pub fn run() {
             commands::get_custom_last,
             commands::save_custom_last,
             commands::sync_integrations,
+            commands::restart_explorer,
             commands::open_data_folder,
             commands::encode,
             commands::get_pending_files,

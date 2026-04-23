@@ -91,6 +91,14 @@ pub fn sync_integrations() -> Result<(), String> {
     integration::sync_all(&ps, &settings).map_err(|e| e.to_string())
 }
 
+/// Kill + relaunch Explorer so it picks up a freshly-registered shell
+/// extension. The frontend only calls this after the user confirms via
+/// a dialog — `modern_menu::sync` never invokes it silently.
+#[tauri::command]
+pub fn restart_explorer() -> Result<(), String> {
+    integration::modern_menu::restart_explorer().map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 pub fn open_data_folder() -> Result<(), String> {
     let p = paths::data_dir().map_err(|e| e.to_string())?;

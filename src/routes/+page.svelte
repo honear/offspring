@@ -454,17 +454,35 @@
             <input
               type="checkbox"
               checked={settings.modern_menu_enabled ?? false}
-              onchange={(e) => {
-                settings.modern_menu_enabled = (e.currentTarget as HTMLInputElement).checked;
-                saveSettings();
+              onchange={async (e) => {
+                const checked = (e.currentTarget as HTMLInputElement).checked;
+                const wasOff = !(settings.modern_menu_enabled ?? false);
+                settings.modern_menu_enabled = checked;
+                await saveSettings();
+                // Explorer caches the modern-menu handler list — the
+                // new entry only appears once it re-launches. Offer to
+                // do it for the user (loses open Explorer windows) but
+                // never force it.
+                if (checked && wasOff) {
+                  const ok = confirm(
+                    "Modern right-click menu enabled.\n\n" +
+                      "Restart Windows Explorer now so it picks up the new menu? " +
+                      "Any open File Explorer windows will close.\n\n" +
+                      "Cancel to restart later — it will also take effect after sign-out / reboot.",
+                  );
+                  if (ok) {
+                    try { await api.restartExplorer(); } catch (err) { alert(String(err)); }
+                  }
+                }
               }}
             />
             <span>Integrate with the <strong>Windows 11 modern right-click menu</strong> (top-level, no extra click)</span>
           </label>
           <p class="tiny muted" style="margin: 0; padding-left: 22px;">
-            Enabling the modern menu registers a sparse MSIX package signed with our self-signed developer
-            certificate. Windows will prompt you once to trust it — click "Trust" or "Install" on that dialog.
-            Turning the toggle off unregisters the package cleanly.
+            Enabling the modern menu registers a sparse MSIX package. The installer already trusted the
+            signing cert, so no prompts appear here. Offspring will offer to restart Windows Explorer so
+            the menu shows up right away — skip it if you have File Explorer windows open and it will
+            take effect after the next sign-out.
           </p>
         </div>
       </div>

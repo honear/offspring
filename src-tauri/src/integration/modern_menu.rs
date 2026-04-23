@@ -104,11 +104,11 @@ pub fn sync(_presets: &[Preset]) -> Result<()> {
     }
 
     register_package(&msix, &dir)?;
-    // Explorer caches the modern-menu handler list aggressively and
-    // won't pick up a freshly-registered shell extension until it's
-    // re-launched. Best-effort — errors here don't invalidate the
-    // registration itself.
-    let _ = restart_explorer();
+    // Explorer caches the modern-menu handler list aggressively, so the
+    // new entry may not appear until Explorer re-launches. We don't do
+    // that here — killing Explorer wipes the user's open windows. The
+    // frontend prompts after a successful toggle and calls
+    // `restart_explorer` only if the user opts in.
     Ok(())
 }
 
@@ -132,7 +132,10 @@ fn register_package(msix: &Path, external_location: &Path) -> Result<()> {
     .context("Add-AppxPackage")
 }
 
-fn restart_explorer() -> Result<()> {
+/// Kill and relaunch Explorer so it re-reads the modern-menu handler
+/// list. Exposed as a Tauri command — the frontend calls it after the
+/// user confirms via a dialog, never silently from `sync`.
+pub fn restart_explorer() -> Result<()> {
     ps("Stop-Process -Name explorer -Force -ErrorAction SilentlyContinue; \
         Start-Sleep -Milliseconds 300; \
         if (-not (Get-Process -Name explorer -ErrorAction SilentlyContinue)) { Start-Process explorer }")
