@@ -58,6 +58,14 @@ pub fn sync(presets: &[Preset]) -> Result<()> {
     let exe = current_exe_string()?;
     let hkcu = RegKey::predef(HKEY_CURRENT_USER);
 
+    // Publish the install path so the MSIX shell-extension DLL (Phase 3+)
+    // can resolve offspring.exe without hard-coding a program-files path.
+    // The DLL runs inside Explorer.exe, has no relation to our install
+    // directory, and the MSIX package location isn't ours either — this
+    // registry value is the contract between the two.
+    let (root_key, _) = hkcu.create_subkey(r"Software\Offspring")?;
+    root_key.set_value("ExePath", &exe)?;
+
     // Top-level verb that Explorer will show as "Offspring" with a ►.
     let root_path = format!(r"Software\Classes\*\shell\{ROOT_VERB}");
     let (root, _) = hkcu
@@ -111,7 +119,10 @@ pub fn sync(presets: &[Preset]) -> Result<()> {
 }
 
 /// Remove our entire subtree. Safe to call when nothing is installed —
-/// missing keys are ignored.
+/// missing keys are ignored. Does NOT remove `HKCU\Software\Offspring`
+/// (the shared ExePath key read by the shell-extension DLL) because the
+/// MSIX integration may still need it; `integration::cleanup_all` is
+/// what fully removes it at uninstall time.
 pub fn cleanup() -> Result<()> {
     let hkcu = RegKey::predef(HKEY_CURRENT_USER);
     let _ = hkcu.delete_subkey_all(format!(r"Software\Classes\*\shell\{ROOT_VERB}"));

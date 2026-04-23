@@ -60,5 +60,10 @@ pub fn cleanup_all() -> Result<()> {
     let _ = context_menu::cleanup();
     let _ = sendto::cleanup();
     let _ = modern_menu::cleanup();
+    // Drop the shared ExePath key only at full uninstall — individual
+    // per-feature cleanups leave it alone so toggling a surface off
+    // doesn't break the others.
+    let hkcu = winreg::RegKey::predef(winreg::enums::HKEY_CURRENT_USER);
+    let _ = hkcu.delete_subkey_all(r"Software\Offspring");
     Ok(())
 }
