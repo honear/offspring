@@ -4,9 +4,9 @@ use tauri::{Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
 use crate::bootstrap;
 use crate::defaults;
 use crate::ffmpeg::{self, ProgressEvent};
+use crate::integration::{context_menu, sendto};
 use crate::paths;
 use crate::presets::{self, Preset, Settings};
-use crate::sendto;
 
 #[derive(Serialize)]
 pub struct FfmpegStatus {
@@ -22,6 +22,7 @@ pub fn list_presets() -> Result<Vec<Preset>, String> {
 #[tauri::command]
 pub fn save_presets(presets_in: Vec<Preset>) -> Result<(), String> {
     presets::save_presets(&presets_in).map_err(|e| e.to_string())?;
+    context_menu::sync(&presets_in).map_err(|e| e.to_string())?;
     sendto::sync(&presets_in).map_err(|e| e.to_string())?;
     Ok(())
 }
@@ -30,6 +31,7 @@ pub fn save_presets(presets_in: Vec<Preset>) -> Result<(), String> {
 pub fn reset_presets_to_defaults() -> Result<Vec<Preset>, String> {
     let d = defaults::default_presets();
     presets::save_presets(&d).map_err(|e| e.to_string())?;
+    context_menu::sync(&d).map_err(|e| e.to_string())?;
     sendto::sync(&d).map_err(|e| e.to_string())?;
     Ok(d)
 }
@@ -75,6 +77,7 @@ pub fn save_custom_last(preset: Preset) -> Result<(), String> {
 #[tauri::command]
 pub fn sync_sendto() -> Result<(), String> {
     let ps = presets::load_presets().map_err(|e| e.to_string())?;
+    context_menu::sync(&ps).map_err(|e| e.to_string())?;
     sendto::sync(&ps).map_err(|e| e.to_string())
 }
 
