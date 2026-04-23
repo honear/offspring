@@ -66,20 +66,6 @@ LGPL does not propagate to Offspring's own code. Offspring itself is MIT.
 
 Full third-party attributions live in [NOTICE.md](./NOTICE.md).
 
-## Building from source
-
-Requires Rust (stable, MSVC toolchain), Node 18+, and the Tauri 2
-prerequisites (WebView2 is already on every supported Windows 11 build).
-
-```powershell
-npm install
-npm run tauri dev       # dev loop — Svelte HMR + Rust rebuilds
-npm run tauri build     # release build → src-tauri\target\release\offspring.exe
-```
-
-To build the shipping installer, run [`installer/offspring.iss`](./installer/offspring.iss)
-through Inno Setup 6 after a release build. See
-[`DESIGN.md`](./DESIGN.md) for architecture notes.
 
 ## License
 
