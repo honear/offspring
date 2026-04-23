@@ -28,4 +28,4 @@ generated with `cargo about` if a distribution requires one.
 ## Icon assets
 
 Icons under [`src-tauri/icons/`](./src-tauri/icons/) are original work
-© 2026 Rolando Barry, released under the same MIT license as the app.
+© 2026 Second March, released under the same MIT license as the app.

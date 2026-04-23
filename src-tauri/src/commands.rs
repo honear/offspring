@@ -192,7 +192,7 @@ pub fn open_custom_window(app: &tauri::AppHandle, files: Vec<String>) -> anyhow:
 pub fn open_main_window(app: &tauri::AppHandle) -> anyhow::Result<()> {
     WebviewWindowBuilder::new(app, "main", WebviewUrl::App("".into()))
         .title("Offspring")
-        .inner_size(880.0, 520.0)
+        .inner_size(880.0, 760.0)
         .min_inner_size(720.0, 460.0)
         .resizable(true)
         .build()?;

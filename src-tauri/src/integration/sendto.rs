@@ -7,11 +7,11 @@ use std::path::{Path, PathBuf};
 use crate::paths;
 use crate::presets::Preset;
 
-/// Legacy filename prefixes. Any .lnk in the user's SendTo folder whose stem
-/// starts with one of these followed by " - " is treated as ours and cleaned
-/// up on sync. This lets pre-existing installs upgrade cleanly to the new
-/// unadorned naming scheme ("GIF 720p.lnk" instead of "Offspring - GIF 720p.lnk").
-const LEGACY_PREFIXES: &[&str] = &["Offspring", "toGIF"];
+/// Legacy filename prefix. Any .lnk in the user's SendTo folder whose stem
+/// starts with "Offspring - " is treated as ours and cleaned up on sync.
+/// This lets pre-existing installs upgrade cleanly to the unadorned naming
+/// scheme ("GIF 720p.lnk" instead of "Offspring - GIF 720p.lnk").
+const LEGACY_PREFIXES: &[&str] = &["Offspring"];
 
 /// On-disk record of which SendTo shortcut filenames belong to us. Without
 /// a filename prefix we have no other way to identify our .lnks vs the user's
@@ -83,8 +83,8 @@ pub fn write_custom_shortcut() -> Result<PathBuf> {
 }
 
 /// Remove any leftover pre-manifest shortcuts from the user's SendTo folder.
-/// These are the old "Offspring - *.lnk" / "toGIF - *.lnk" naming we used
-/// before switching to unadorned preset names. Safe to run on every sync.
+/// These are the old "Offspring - *.lnk" naming we used before switching to
+/// unadorned preset names. Safe to run on every sync.
 fn remove_legacy_shortcuts() -> Result<()> {
     let dir = paths::sendto_dir()?;
     if !dir.exists() {

@@ -13,6 +13,8 @@
   let dirty = $state(false);
   let saving = $state(false);
   let savedTick = $state(0);
+  // Right-click menu for preset rows. Non-null when visible.
+  let ctxMenu = $state<{ x: number; y: number; preset: Preset } | null>(null);
 
   // FFmpeg download state (fed by the `ffmpeg-download` event from Rust)
   let dl = $state<{
@@ -242,6 +244,29 @@
   });
 </script>
 
+<svelte:window onclick={() => (ctxMenu = null)} />
+
+{#if ctxMenu}
+  <div
+    class="ctx-menu"
+    style="left: {ctxMenu.x}px; top: {ctxMenu.y}px;"
+    role="menu"
+    onclick={(e) => e.stopPropagation()}
+  >
+    <button
+      type="button"
+      role="menuitem"
+      onclick={() => { duplicatePreset(ctxMenu!.preset); ctxMenu = null; }}
+    >Duplicate</button>
+    <button
+      type="button"
+      role="menuitem"
+      class="danger"
+      onclick={() => { deletePreset(ctxMenu!.preset); ctxMenu = null; }}
+    >Delete</button>
+  </div>
+{/if}
+
 {#if update && update.update_available}
   <aside class="update-banner" role="status">
     <span class="update-icon" aria-hidden="true">⬆</span>
@@ -279,7 +304,7 @@
       </span>
       {#if dirty}
         <button class="primary" onclick={save} disabled={saving}>
-          {saving ? "Saving…" : "Save & Sync SendTo"}
+          {saving ? "Saving…" : "Save and Sync"}
         </button>
       {:else if savedTick > 0}
         <span class="tiny saved">Saved</span>
@@ -299,6 +324,11 @@
             <li
               class={selectedId === p.id ? "row-item active" : "row-item"}
               onclick={() => (selectedId = p.id)}
+              oncontextmenu={(e) => {
+                e.preventDefault();
+                selectedId = p.id;
+                ctxMenu = { x: e.clientX, y: e.clientY, preset: p };
+              }}
               onkeydown={(e) => e.key === "Enter" && (selectedId = p.id)}
               role="button"
               tabindex="0"
@@ -633,6 +663,30 @@
     transition: background 120ms ease;
     font-size: var(--fs-13, 13px);
   }
+  .ctx-menu {
+    position: fixed;
+    z-index: 1000;
+    min-width: 140px;
+    padding: 4px;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    background: var(--c-surface);
+    border: 1px solid var(--c-border);
+    border-radius: var(--r-sm);
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.2);
+  }
+  .ctx-menu button {
+    all: unset;
+    padding: 6px 10px;
+    border-radius: var(--r-sm);
+    font-size: var(--fs-13, 13px);
+    cursor: pointer;
+    color: var(--c-text);
+  }
+  .ctx-menu button:hover { background: var(--c-surface-2); }
+  .ctx-menu button.danger { color: var(--c-danger, #b91c1c); }
+  .ctx-menu button.danger:hover { background: var(--c-danger-tint, rgba(185, 28, 28, 0.12)); }
   .row-item:hover { background: var(--c-surface); }
   .row-item.active {
     background: var(--c-surface);
