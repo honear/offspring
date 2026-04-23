@@ -1,6 +1,6 @@
 [package]
 name = "offspring-shell-ext"
-version = "0.3.5"
+version = "0.3.6"
 edition = "2021"
 description = "Windows 11 modern right-click menu handler for Offspring"
 authors = ["Second March"]

@@ -60,3 +60,31 @@ export function onFinished(fn: (total: number) => void): Promise<UnlistenFn> {
 /** Hit the GitHub Releases API and report whether a newer version exists.
  * Never throws — network errors collapse to `update_available: false`. */
 export const checkForUpdates = () => invoke<UpdateInfo>("check_for_updates");
+
+/** Kick off a background download of the installer for `version` from
+ * `installerUrl`. Progress arrives on `update-download`. Resolves as soon
+ * as the worker thread is spawned — observe `onUpdateDownload` for
+ * completion. */
+export const downloadUpdate = (version: string, installerUrl: string) =>
+  invoke<void>("download_update", { version, installerUrl });
+
+/** Launch the previously-downloaded installer silently and exit the app
+ * so Inno Setup can overwrite offspring.exe. The installer re-launches
+ * Offspring automatically after the swap. */
+export const installUpdate = (version: string) =>
+  invoke<void>("install_update", { version });
+
+export type UpdateDownloadEvent = {
+  /** "downloading" | "done" | "error" */
+  phase: string;
+  percent: number | null;
+  /** On "done": absolute path to the downloaded .exe. On "error": the
+   * error message. On "downloading": a human-readable byte count. */
+  message: string | null;
+};
+
+export function onUpdateDownload(
+  fn: (ev: UpdateDownloadEvent) => void,
+): Promise<UnlistenFn> {
+  return listen<UpdateDownloadEvent>("update-download", (e) => fn(e.payload));
+}

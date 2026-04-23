@@ -55,6 +55,8 @@ pub fn run() {
             commands::get_pending_custom_preset,
             commands::prepare_custom_encode,
             updates::check_for_updates,
+            updates::download_update,
+            updates::install_update,
         ])
         .setup(move |app| {
             let handle = app.handle().clone();

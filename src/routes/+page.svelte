@@ -31,6 +31,17 @@
   const UPDATE_CACHE_KEY = "offspring.updateInfo";
   const UPDATE_DISMISS_KEY = "offspring.updateDismissedFor";
 
+  // In-app update download state. `phase` drives the banner button:
+  //   idle        — update detected, download not started
+  //   downloading — streaming the installer in the background
+  //   ready       — installer on disk, ready to run
+  //   error       — download failed; fall back to browser download
+  let upd = $state<{
+    phase: "idle" | "downloading" | "ready" | "error";
+    percent: number | null;
+    message: string | null;
+  }>({ phase: "idle", percent: null, message: null });
+
   const selected = $derived(presets.find((p) => p.id === selectedId) ?? null);
 
   onMount(async () => {
@@ -40,6 +51,24 @@
     // failure (no network / private repo / no releases yet) collapses to
     // "no banner" rather than a visible error.
     void checkUpdate();
+
+    // Subscribe to update download events before kicking off the check so
+    // we never miss a "done" emitted from an auto-started download.
+    await api.onUpdateDownload((e) => {
+      if (e.phase === "downloading") {
+        upd.phase = "downloading";
+        upd.percent = e.percent;
+        upd.message = e.message;
+      } else if (e.phase === "done") {
+        upd.phase = "ready";
+        upd.percent = 100;
+        upd.message = null;
+      } else if (e.phase === "error") {
+        upd.phase = "error";
+        upd.percent = null;
+        upd.message = e.message;
+      }
+    });
 
     // Subscribe to FFmpeg download events so the Settings pane can show
     // progress inline and flip the header badge when the install completes.
@@ -86,6 +115,7 @@
         const parsed = JSON.parse(cached) as UpdateInfo;
         if (parsed.update_available && dismissedFor !== parsed.latest) {
           update = parsed;
+          maybeStartDownload(parsed);
         }
       } catch {}
     }
@@ -93,20 +123,57 @@
     try {
       const info = await api.checkForUpdates();
       sessionStorage.setItem(UPDATE_CACHE_KEY, JSON.stringify(info));
-      update =
-        info.update_available && dismissedFor !== info.latest ? info : null;
+      if (info.update_available && dismissedFor !== info.latest) {
+        update = info;
+        maybeStartDownload(info);
+      } else {
+        update = null;
+      }
     } catch {
       // Network fail = stay quiet. The worst user outcome here is "you
       // didn't know about an update yet", which is fine.
     }
   }
 
-  async function openUpdatePage() {
+  // Level 2 behaviour: as soon as we know a newer version is out there,
+  // eagerly stream the installer in the background. No user interaction
+  // needed until they're ready to restart. Skipped if there's no direct
+  // installer URL on the release (we fall back to opening the release page).
+  function maybeStartDownload(info: UpdateInfo) {
+    if (!info.installer_url) return;
+    if (upd.phase === "downloading" || upd.phase === "ready") return;
+    upd = { phase: "downloading", percent: 0, message: "Starting…" };
+    api.downloadUpdate(info.latest, info.installer_url).catch((err) => {
+      upd.phase = "error";
+      upd.percent = null;
+      upd.message = String(err);
+    });
+  }
+
+  async function onUpdateClick() {
     if (!update) return;
-    try {
-      // Prefer the direct installer download; fall back to the release page.
-      await openUrl(update.installer_url || update.html_url);
-    } catch {}
+    if (upd.phase === "ready") {
+      // Installer is on disk — run it silently and exit. Inno Setup's
+      // /RESTARTAPPLICATIONS will re-launch Offspring after the swap.
+      try {
+        await api.installUpdate(update.latest);
+      } catch (err) {
+        upd.phase = "error";
+        upd.message = String(err);
+      }
+      return;
+    }
+    if (upd.phase === "error" || !update.installer_url) {
+      // Download failed or there's no .exe asset — open the release page
+      // so the user can grab it manually.
+      try {
+        await openUrl(update.installer_url || update.html_url);
+      } catch {}
+      return;
+    }
+    // "idle" or still "downloading" — if we haven't kicked off yet, do so
+    // now; otherwise the click is a no-op while progress ticks.
+    if (upd.phase === "idle") maybeStartDownload(update);
   }
 
   function dismissUpdate() {
@@ -271,11 +338,40 @@
   <aside class="update-banner" role="status">
     <span class="update-icon" aria-hidden="true">⬆</span>
     <span class="update-text">
-      Version <strong>{update.latest}</strong> is available (you have {update.current}).
+      {#if upd.phase === "downloading"}
+        Downloading <strong>{update.latest}</strong>{upd.percent != null ? ` — ${Math.round(upd.percent)}%` : "…"}
+      {:else if upd.phase === "ready"}
+        Version <strong>{update.latest}</strong> is ready to install.
+      {:else if upd.phase === "error"}
+        Update <strong>{update.latest}</strong> couldn't download automatically.
+      {:else}
+        Version <strong>{update.latest}</strong> is available (you have {update.current}).
+      {/if}
     </span>
-    <button type="button" class="update-btn" onclick={openUpdatePage}>
-      Download
-    </button>
+    {#if upd.phase === "downloading"}
+      <div class="update-bar" aria-hidden="true">
+        <div
+          class="update-bar-fill"
+          class:indet={upd.percent == null}
+          style={upd.percent != null ? `width: ${Math.round(upd.percent)}%;` : ""}
+        ></div>
+      </div>
+    {:else}
+      <button
+        type="button"
+        class="update-btn"
+        onclick={onUpdateClick}
+        disabled={upd.phase === "downloading"}
+      >
+        {#if upd.phase === "ready"}
+          Restart and install
+        {:else if upd.phase === "error"}
+          Open download page
+        {:else}
+          Download
+        {/if}
+      </button>
+    {/if}
     <button
       type="button"
       class="update-close"
@@ -575,8 +671,32 @@
     font-weight: 500;
     cursor: pointer;
   }
-  .update-btn:hover {
+  .update-btn:hover:not(:disabled) {
     background: rgba(255, 255, 255, 0.32);
+  }
+  .update-btn:disabled {
+    opacity: 0.55;
+    cursor: default;
+  }
+  .update-bar {
+    width: 140px;
+    height: 6px;
+    background: rgba(255, 255, 255, 0.25);
+    border-radius: var(--r-pill, 999px);
+    overflow: hidden;
+  }
+  .update-bar-fill {
+    height: 100%;
+    background: #fff;
+    transition: width 200ms ease;
+  }
+  .update-bar-fill.indet {
+    width: 40%;
+    animation: update-slide 1.2s ease-in-out infinite;
+  }
+  @keyframes update-slide {
+    0%   { transform: translateX(-120%); }
+    100% { transform: translateX(260%); }
   }
   .update-close {
     background: transparent;
