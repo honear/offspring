@@ -180,36 +180,63 @@ pub fn install_update(version: String) -> Result<(), String> {
     // /VERYSILENT — no UI. /NORESTART — never reboot the machine.
     // /SUPPRESSMSGBOXES — pair with /SILENT to swallow any "another
     // instance is running" prompts if the restart-app handshake misfires.
-    let child = std::process::Command::new(&path)
+    std::process::Command::new(&path)
         .args(["/VERYSILENT", "/NORESTART", "/SUPPRESSMSGBOXES"])
         .spawn()
         .map_err(|e| format!("spawning installer: {e}"))?;
-    let installer_pid = child.id();
 
-    // Post-swap relaunch. We spawn a detached PowerShell that:
-    //   1. Waits on the installer PID so it only fires after Inno is done.
-    //   2. Sleeps a second so the new exe file handle is fully released.
-    //   3. Start-Process the freshly-installed offspring.exe.
-    // Launched with CREATE_NO_WINDOW | DETACHED_PROCESS so it survives
-    // our own exit and never flashes a console window.
+    // Post-swap relaunch. We can't wait on the installer PID because
+    // Inno Setup forks almost immediately (extracts Setup.tmp, re-launches
+    // elevated, exits the original). Instead, the watcher polls our own
+    // exe file for exclusive read access — that test fails while *any*
+    // process (us, the installer, the UAC bootstrap) has it open, and
+    // succeeds the moment all file handles are released. Then it waits
+    // one more second for Windows to settle the new image and launches
+    // offspring.exe.
+    //
+    // Spawned with DETACHED_PROCESS so it survives our own exit with no
+    // console and no parent-process dependency. Logs to
+    // `%LOCALAPPDATA%\Offspring\update-relaunch.log` so a silent failure
+    // can be diagnosed after the fact.
     let exe = std::env::current_exe()
         .map_err(|e| format!("locating current exe: {e}"))?;
+    let log = paths::local_data_dir()
+        .map_err(|e| format!("locating local data dir: {e}"))?
+        .join("update-relaunch.log");
     let exe_str = exe.display().to_string().replace('\'', "''");
+    let log_str = log.display().to_string().replace('\'', "''");
     let ps_cmd = format!(
-        "Wait-Process -Id {installer_pid} -ErrorAction SilentlyContinue; \
+        "$exe = '{exe_str}'; \
+         $log = '{log_str}'; \
+         \"[$(Get-Date -Format o)] watcher started, polling $exe\" | Out-File -FilePath $log -Append -Encoding utf8; \
+         $ok = $false; \
+         for ($i = 0; $i -lt 60; $i++) {{ \
+             Start-Sleep -Seconds 1; \
+             try {{ \
+                 $s = [System.IO.File]::Open($exe, 'Open', 'Read', 'None'); \
+                 $s.Close(); \
+                 $ok = $true; \
+                 break \
+             }} catch {{}} \
+         }} \
+         \"[$(Get-Date -Format o)] poll result: $ok after $i iterations\" | Out-File -FilePath $log -Append -Encoding utf8; \
          Start-Sleep -Seconds 1; \
-         Start-Process -FilePath '{exe_str}'"
+         try {{ \
+             Start-Process -FilePath $exe -ErrorAction Stop; \
+             \"[$(Get-Date -Format o)] relaunch OK\" | Out-File -FilePath $log -Append -Encoding utf8 \
+         }} catch {{ \
+             \"[$(Get-Date -Format o)] relaunch FAIL: $($_.Exception.Message)\" | Out-File -FilePath $log -Append -Encoding utf8 \
+         }}"
     );
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     const DETACHED_PROCESS: u32 = 0x0000_0008;
     std::process::Command::new("powershell.exe")
         .args(["-NoProfile", "-WindowStyle", "Hidden", "-Command", &ps_cmd])
-        .creation_flags(CREATE_NO_WINDOW | DETACHED_PROCESS)
+        .creation_flags(DETACHED_PROCESS)
         .spawn()
         .map_err(|e| format!("spawning relaunch watcher: {e}"))?;
 
-    // Give the installer a beat to acquire its lock before we release
-    // ours and exit.
+    // Give the watcher and installer a beat to initialize before we
+    // release our own exe file handle by exiting.
     std::thread::sleep(Duration::from_millis(500));
     std::process::exit(0);
 }
