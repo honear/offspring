@@ -13,12 +13,18 @@
 //! toggle on will surface Windows' own `0x800B0109` untrusted-root
 //! error.
 
+use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{anyhow, Context, Result};
 
 use crate::presets::Preset;
+
+/// Win32 process-creation flag. Suppresses the console window that
+/// `powershell.exe` would otherwise flash in front of our GUI for each
+/// integration call (toggle save, first-run, etc.).
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 /// Matches `<Identity Name>` in `installer/msix/AppxManifest.xml`.
 const PACKAGE_NAME: &str = "SecondMarch.Offspring.ShellExt";
@@ -47,6 +53,7 @@ fn ps(script: &str) -> Result<()> {
             "-ExecutionPolicy", "Bypass",
             "-Command", script,
         ])
+        .creation_flags(CREATE_NO_WINDOW)
         .output()
         .context("launching powershell.exe")?;
     if !output.status.success() {
@@ -70,6 +77,7 @@ fn is_registered() -> bool {
                 "if (Get-AppxPackage -Name '{PACKAGE_NAME}' -ErrorAction SilentlyContinue) {{ 'yes' }}"
             ),
         ])
+        .creation_flags(CREATE_NO_WINDOW)
         .output()
     else {
         return false;
@@ -96,6 +104,11 @@ pub fn sync(_presets: &[Preset]) -> Result<()> {
     }
 
     register_package(&msix, &dir)?;
+    // Explorer caches the modern-menu handler list aggressively and
+    // won't pick up a freshly-registered shell extension until it's
+    // re-launched. Best-effort — errors here don't invalidate the
+    // registration itself.
+    let _ = restart_explorer();
     Ok(())
 }
 
@@ -117,4 +130,10 @@ fn register_package(msix: &Path, external_location: &Path) -> Result<()> {
         external_location.display()
     ))
     .context("Add-AppxPackage")
+}
+
+fn restart_explorer() -> Result<()> {
+    ps("Stop-Process -Name explorer -Force -ErrorAction SilentlyContinue; \
+        Start-Sleep -Milliseconds 300; \
+        if (-not (Get-Process -Name explorer -ErrorAction SilentlyContinue)) { Start-Process explorer }")
 }

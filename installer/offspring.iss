@@ -10,7 +10,7 @@
 ; Compile with the Inno Setup compiler (iscc.exe or the Inno Setup IDE).
 
 #define AppName      "Offspring"
-#define AppVersion   "0.3.2"
+#define AppVersion   "0.3.3"
 #define AppPublisher "Rolando Barry"
 #define AppExeName   "offspring.exe"
 #define AppId        "{{D8E5C6BC-5F10-4B29-A8A9-7D4D1A3B9C22}"
@@ -60,6 +60,7 @@ Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription:
 Source: "{#BinDir}\{#AppExeName}"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\DESIGN.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "scripts\download_ffmpeg.ps1"; DestDir: "{app}\scripts"; Flags: ignoreversion
+Source: "scripts\trust_cert.ps1"; DestDir: "{app}\scripts"; Flags: ignoreversion
 ; Shell-ext DLL + signed sparse MSIX + public cert, consumed by the
 ; modern-menu Settings toggle (Add-AppxPackage runs against them from
 ; the app at toggle-on time). The CI workflow copies the DLL from
@@ -82,8 +83,12 @@ Filename: "powershell.exe"; \
 ; Trust the shell-extension signing cert machine-wide so the modern-menu
 ; toggle's Add-AppxPackage call doesn't fail with 0x800B0109 (untrusted
 ; root). Installer is admin-only, so no privilege check needed.
+; Delegated to a dedicated script to avoid Inno-Setup's `}}` escaping
+; gotcha (only `{{` escapes — a stray `}` slips through and breaks the
+; embedded PowerShell). The script logs to %ProgramData% so silent
+; failures at install time can be diagnosed later.
 Filename: "powershell.exe"; \
-    Parameters: "-NoProfile -ExecutionPolicy Bypass -Command ""if (Test-Path '{app}\OffspringShellExt.cer') {{ Import-Certificate -FilePath '{app}\OffspringShellExt.cer' -CertStoreLocation Cert:\LocalMachine\TrustedPeople | Out-Null }}"""; \
+    Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\scripts\trust_cert.ps1"" -CerPath ""{app}\OffspringShellExt.cer"""; \
     StatusMsg: "Trusting shell-extension certificate..."; \
     Flags: runhidden waituntilterminated
 ; Seed default presets + populate SendTo shortcuts
