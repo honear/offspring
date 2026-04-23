@@ -94,6 +94,18 @@ pub struct Settings {
     pub pause_after: Option<bool>,
     #[serde(default)]
     pub descriptive_names: Option<bool>,
+    /// Whether to mirror the preset list into the user's SendTo folder.
+    /// Off by default — the right-click "Offspring ►" submenu from the
+    /// registry-based integration replaces the SendTo surface. Flip this
+    /// on to get entries under "Send to" on top of that.
+    #[serde(default)]
+    pub sendto_enabled: Option<bool>,
+    /// Whether the Windows 11 modern (top-level) right-click menu should
+    /// carry Offspring. Requires registering an MSIX sparse package with
+    /// a self-signed cert; handled by `integration::modern_menu`. Off by
+    /// default because enabling it prompts the user for cert trust.
+    #[serde(default)]
+    pub modern_menu_enabled: Option<bool>,
 }
 
 pub fn load_presets() -> Result<Vec<Preset>> {
