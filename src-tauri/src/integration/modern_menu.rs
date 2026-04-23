@@ -1,17 +1,17 @@
 //! Windows 11 modern (top-level) right-click menu — MSIX sparse package
 //! backed by the `IExplorerCommand` shell extension in `shell-ext/`.
 //!
-//! `sync` is idempotent: it imports the bundled cert into the per-user
-//! TrustedPeople store (the only step that can prompt the user), then
-//! runs `Add-AppxPackage -ExternalLocation <install dir>`. Repeat calls
-//! short-circuit when the package is already registered.
+//! `sync` is idempotent: it runs `Add-AppxPackage -ExternalLocation
+//! <install dir>`. Repeat calls short-circuit when the package is
+//! already registered.
 //!
-//! `cleanup` unregisters the package but intentionally leaves the cert
-//! in TrustedPeople. The cert is signed by our private key only, so
-//! leaving it trusted doesn't broaden the attack surface — and pulling
-//! it out on every toggle flip would re-prompt the user next time they
-//! flip the toggle back on, which is exactly the friction this surface
-//! is trying to avoid.
+//! Cert trust is NOT handled here. `Add-AppxPackage` validates MSIX
+//! signatures against `LocalMachine\TrustedPeople`, which requires
+//! admin rights to populate — so the installer imports the cert during
+//! its elevated `[Run]` phase and the uninstaller removes it. Per-user
+//! (non-elevated) installs skip the trust step, and flipping this
+//! toggle on will surface Windows' own `0x800B0109` untrusted-root
+//! error.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -23,10 +23,10 @@ use crate::presets::Preset;
 /// Matches `<Identity Name>` in `installer/msix/AppxManifest.xml`.
 const PACKAGE_NAME: &str = "SecondMarch.Offspring.ShellExt";
 
-/// Filenames produced by `installer/msix/build-msix.ps1` and bundled into
-/// the installer's `{app}\` directory.
+/// Filename produced by `installer/msix/build-msix.ps1` and bundled into
+/// the installer's `{app}\` directory. The `.cer` sibling is consumed by
+/// the installer's elevated `[Run]` step and not referenced from here.
 const MSIX_FILENAME: &str = "OffspringShellExt.msix";
-const CER_FILENAME: &str = "OffspringShellExt.cer";
 
 fn install_dir() -> Result<PathBuf> {
     let exe = std::env::current_exe().context("resolving current exe")?;
@@ -86,17 +86,15 @@ pub fn sync(_presets: &[Preset]) -> Result<()> {
     }
 
     let dir = install_dir()?;
-    let cer = dir.join(CER_FILENAME);
     let msix = dir.join(MSIX_FILENAME);
 
-    if !cer.exists() || !msix.exists() {
-        // Installer didn't ship the MSIX artifacts — probably a dev
+    if !msix.exists() {
+        // Installer didn't ship the MSIX artifact — probably a dev
         // build where the MSIX pipeline hasn't run. Don't error; just
         // no-op so the Settings toggle save doesn't blow up on devs.
         return Ok(());
     }
 
-    trust_cert(&cer)?;
     register_package(&msix, &dir)?;
     Ok(())
 }
@@ -110,15 +108,6 @@ pub fn cleanup() -> Result<()> {
          Remove-AppxPackage -ErrorAction SilentlyContinue"
     ));
     Ok(())
-}
-
-fn trust_cert(cer: &Path) -> Result<()> {
-    ps(&format!(
-        "Import-Certificate -FilePath '{}' \
-         -CertStoreLocation 'Cert:\\CurrentUser\\TrustedPeople' | Out-Null",
-        cer.display()
-    ))
-    .context("importing cert into TrustedPeople")
 }
 
 fn register_package(msix: &Path, external_location: &Path) -> Result<()> {

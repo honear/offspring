@@ -76,6 +76,15 @@ Filename: "powershell.exe"; \
     Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\scripts\download_ffmpeg.ps1"""; \
     StatusMsg: "Checking FFmpeg..."; \
     Flags: runhidden waituntilterminated
+; Trust the shell-extension signing cert machine-wide so the modern-menu
+; toggle's Add-AppxPackage call doesn't fail with 0x800B0109 (untrusted
+; root). Requires elevation — skipped on per-user installs, in which case
+; the modern-menu toggle will surface a clear error when flipped on.
+Filename: "powershell.exe"; \
+    Parameters: "-NoProfile -ExecutionPolicy Bypass -Command ""if (Test-Path '{app}\OffspringShellExt.cer') {{ Import-Certificate -FilePath '{app}\OffspringShellExt.cer' -CertStoreLocation Cert:\LocalMachine\TrustedPeople | Out-Null }}"""; \
+    StatusMsg: "Trusting shell-extension certificate..."; \
+    Check: IsAdminInstallMode; \
+    Flags: runhidden waituntilterminated
 ; Seed default presets + populate SendTo shortcuts
 Filename: "{app}\{#AppExeName}"; \
     Parameters: "first-run"; \
@@ -90,6 +99,13 @@ Filename: "{app}\{#AppExeName}"; \
 Filename: "{app}\{#AppExeName}"; \
     Parameters: "cleanup"; \
     RunOnceId: "OffspringSendToCleanup"; \
+    Flags: runhidden waituntilterminated
+; Remove the shell-extension signing cert from LocalMachine\TrustedPeople.
+; Best-effort: silently continues if the cert isn't present (per-user
+; install that never trusted it) or if the process lacks admin rights.
+Filename: "powershell.exe"; \
+    Parameters: "-NoProfile -ExecutionPolicy Bypass -Command ""Get-ChildItem Cert:\LocalMachine\TrustedPeople -ErrorAction SilentlyContinue | Where-Object {{ $_.Subject -eq 'CN=Second March' }} | Remove-Item -ErrorAction SilentlyContinue"""; \
+    RunOnceId: "OffspringCertCleanup"; \
     Flags: runhidden waituntilterminated
 
 [UninstallDelete]
