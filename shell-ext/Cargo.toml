@@ -1,0 +1,43 @@
+[package]
+name = "offspring-shell-ext"
+version = "0.2.0"
+edition = "2021"
+description = "Windows 11 modern right-click menu handler for Offspring"
+authors = ["Rolando Barry"]
+publish = false
+
+[lib]
+# `IExplorerCommand` is loaded by Explorer.exe as a classic COM in-proc
+# server. That means a plain Windows DLL — no Rust-ABI exports, just the
+# COM entry points DllGetClassObject / DllCanUnloadNow.
+name = "offspring_shell_ext"
+crate-type = ["cdylib"]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+dirs = "5"
+# windows-core is a direct dep because the `#[implement]` macro in
+# `windows` 0.58 expands to `::windows_core::...` paths. Without it,
+# any COM server we implement fails to resolve.
+windows-core = "0.58"
+
+[dependencies.windows]
+version = "0.58"
+features = [
+    "implement",
+    "Win32_Foundation",
+    "Win32_System_Com",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Registry",
+    "Win32_UI_Shell",
+    "Win32_UI_Shell_Common",
+    "Win32_UI_WindowsAndMessaging",
+]
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+panic = "abort"
+strip = true
