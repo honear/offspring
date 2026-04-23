@@ -1,0 +1,102 @@
+name: Release
+
+# Triggered by pushing a version tag. Example workflow:
+#   1. Bump version in package.json + src-tauri/Cargo.toml + tauri.conf.json
+#      + installer/offspring.iss (AppVersion).
+#   2. git commit -am "chore: bump to 0.3.0"
+#   3. git tag v0.3.0 && git push && git push --tags
+#
+# The job below:
+#   - Builds the Svelte frontend + Rust backend via `npm run tauri build`
+#   - Runs the Inno Setup compiler against installer/offspring.iss to produce
+#     Offspring-Setup-<version>.exe
+#   - Creates a GitHub Release from the pushed tag and attaches the installer
+#
+# The in-app updater (src-tauri/src/updates.rs) looks for an asset whose name
+# starts with "Offspring-Setup" and ends in ".exe" on the latest release.
+# Don't rename the asset without updating that matcher.
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+
+permissions:
+  contents: write  # required to create releases and upload assets
+
+jobs:
+  build:
+    runs-on: windows-latest
+    env:
+      # Keep the runner's cargo cache on the job's workspace disk so the
+      # cache action below actually hits it.
+      CARGO_TERM_COLOR: always
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Derive version from tag
+        id: ver
+        shell: bash
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          VERSION="${TAG#v}"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG"           >> "$GITHUB_OUTPUT"
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Cache Cargo registry + target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            src-tauri/target
+          key: cargo-${{ runner.os }}-${{ hashFiles('src-tauri/Cargo.lock') }}
+          restore-keys: |
+            cargo-${{ runner.os }}-
+
+      - name: npm install
+        run: npm ci
+
+      - name: Build app (tauri build)
+        run: npm run tauri build
+
+      - name: Install Inno Setup
+        run: choco install innosetup --no-progress -y
+
+      - name: Copy offspring.exe into expected pre-ISS location
+        # The Inno script references ..\src-tauri\target\release\offspring.exe
+        # relative to installer/. In a default `npm run tauri build` on CI
+        # that's exactly where the binary lands.
+        shell: pwsh
+        run: Get-Item src-tauri/target/release/offspring.exe
+
+      - name: Compile Inno Setup installer
+        shell: pwsh
+        run: |
+          & "C:\Program Files (x86)\Inno Setup 6\iscc.exe" installer/offspring.iss
+          Get-ChildItem installer/dist/
+
+      - name: Create GitHub Release + upload installer
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.ver.outputs.tag }}
+          name: Offspring ${{ steps.ver.outputs.version }}
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+          files: |
+            installer/dist/Offspring-Setup-${{ steps.ver.outputs.version }}.exe

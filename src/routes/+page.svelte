@@ -1,8 +1,9 @@
 <script lang="ts">
   import { onMount } from "svelte";
+  import { openUrl } from "@tauri-apps/plugin-opener";
   import FormatFields from "$lib/components/FormatFields.svelte";
   import * as api from "$lib/api";
-  import type { Preset, Settings, FfmpegStatus } from "$lib/types";
+  import type { Preset, Settings, FfmpegStatus, UpdateInfo } from "$lib/types";
 
   let presets = $state<Preset[]>([]);
   let selectedId = $state<string | null>(null);
@@ -22,10 +23,21 @@
     error: string | null;
   }>({ active: false, phase: "", percent: null, message: null, error: null });
 
+  // Update-check state. We cache the most recent result in sessionStorage so
+  // switching tabs in the webview doesn't re-hit GitHub on every mount.
+  let update = $state<UpdateInfo | null>(null);
+  const UPDATE_CACHE_KEY = "offspring.updateInfo";
+  const UPDATE_DISMISS_KEY = "offspring.updateDismissedFor";
+
   const selected = $derived(presets.find((p) => p.id === selectedId) ?? null);
 
   onMount(async () => {
     await reload();
+
+    // Fire-and-forget update check. We don't block reload on this, and any
+    // failure (no network / private repo / no releases yet) collapses to
+    // "no banner" rather than a visible error.
+    void checkUpdate();
 
     // Subscribe to FFmpeg download events so the Settings pane can show
     // progress inline and flip the header badge when the install completes.
@@ -56,6 +68,49 @@
       dl.active = false;
       dl.error = String(err);
     }
+  }
+
+  async function checkUpdate() {
+    // Respect an in-session dismiss for this specific version so closing the
+    // banner stays closed until the app is relaunched (or a newer version
+    // lands).
+    const dismissedFor = sessionStorage.getItem(UPDATE_DISMISS_KEY);
+
+    // Warm-start from cache so the banner renders without a round-trip when
+    // navigating between routes (progress → main, etc).
+    const cached = sessionStorage.getItem(UPDATE_CACHE_KEY);
+    if (cached) {
+      try {
+        const parsed = JSON.parse(cached) as UpdateInfo;
+        if (parsed.update_available && dismissedFor !== parsed.latest) {
+          update = parsed;
+        }
+      } catch {}
+    }
+
+    try {
+      const info = await api.checkForUpdates();
+      sessionStorage.setItem(UPDATE_CACHE_KEY, JSON.stringify(info));
+      update =
+        info.update_available && dismissedFor !== info.latest ? info : null;
+    } catch {
+      // Network fail = stay quiet. The worst user outcome here is "you
+      // didn't know about an update yet", which is fine.
+    }
+  }
+
+  async function openUpdatePage() {
+    if (!update) return;
+    try {
+      // Prefer the direct installer download; fall back to the release page.
+      await openUrl(update.installer_url || update.html_url);
+    } catch {}
+  }
+
+  function dismissUpdate() {
+    if (!update) return;
+    sessionStorage.setItem(UPDATE_DISMISS_KEY, update.latest);
+    update = null;
   }
 
   async function reload() {
@@ -186,6 +241,24 @@
     }
   });
 </script>
+
+{#if update && update.update_available}
+  <aside class="update-banner" role="status">
+    <span class="update-icon" aria-hidden="true">⬆</span>
+    <span class="update-text">
+      Version <strong>{update.latest}</strong> is available (you have {update.current}).
+    </span>
+    <button type="button" class="update-btn" onclick={openUpdatePage}>
+      Download
+    </button>
+    <button
+      type="button"
+      class="update-close"
+      aria-label="Dismiss update notice"
+      onclick={dismissUpdate}
+    >×</button>
+  </aside>
+{/if}
 
 <main class="shell">
   <header class="topbar">
@@ -373,6 +446,52 @@
 
 <style>
   .shell { display: flex; flex-direction: column; height: 100vh; }
+
+  .update-banner {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 16px;
+    background: var(--c-accent, #3b82f6);
+    color: #fff;
+    font-size: var(--fs-14, 14px);
+    border-bottom: 1px solid rgba(0, 0, 0, 0.15);
+  }
+  .update-icon {
+    font-weight: bold;
+    opacity: 0.9;
+  }
+  .update-text {
+    flex: 1;
+  }
+  .update-text strong {
+    font-weight: 600;
+  }
+  .update-btn {
+    background: rgba(255, 255, 255, 0.22);
+    color: #fff;
+    border: 1px solid rgba(255, 255, 255, 0.35);
+    padding: 4px 12px;
+    border-radius: var(--r-sm, 6px);
+    font-weight: 500;
+    cursor: pointer;
+  }
+  .update-btn:hover {
+    background: rgba(255, 255, 255, 0.32);
+  }
+  .update-close {
+    background: transparent;
+    color: #fff;
+    border: none;
+    font-size: 18px;
+    line-height: 1;
+    padding: 2px 6px;
+    cursor: pointer;
+    opacity: 0.8;
+  }
+  .update-close:hover {
+    opacity: 1;
+  }
 
   .topbar {
     display: grid;

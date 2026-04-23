@@ -15,6 +15,17 @@
 #define AppExeName   "offspring.exe"
 #define AppId        "{{D8E5C6BC-5F10-4B29-A8A9-7D4D1A3B9C22}"
 
+; Resolve where Cargo dropped offspring.exe. When CARGO_TARGET_DIR is set in
+; the environment (as it is on dev machines sharing a target dir across
+; projects), use <CARGO_TARGET_DIR>\release. Otherwise fall back to the
+; repo-local path that Tauri uses by default on CI.
+#define CargoTargetDirEnv GetEnv("CARGO_TARGET_DIR")
+#if CargoTargetDirEnv == ""
+  #define BinDir "..\src-tauri\target\release"
+#else
+  #define BinDir CargoTargetDirEnv + "\release"
+#endif
+
 [Setup]
 AppId={#AppId}
 AppName={#AppName}
@@ -43,7 +54,7 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription: "Additional options:"; Flags: unchecked
 
 [Files]
-Source: "..\src-tauri\target\release\{#AppExeName}"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#BinDir}\{#AppExeName}"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\DESIGN.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "scripts\download_ffmpeg.ps1"; DestDir: "{app}\scripts"; Flags: ignoreversion
 
@@ -71,6 +82,7 @@ Filename: "{app}\{#AppExeName}"; \
 ; Remove SendTo shortcuts before files are deleted
 Filename: "{app}\{#AppExeName}"; \
     Parameters: "cleanup"; \
+    RunOnceId: "OffspringSendToCleanup"; \
     Flags: runhidden waituntilterminated
 
 [UninstallDelete]

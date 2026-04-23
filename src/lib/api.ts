@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import type { Preset, Settings, FfmpegStatus, ProgressEvent } from "./types";
+import type { Preset, Settings, FfmpegStatus, ProgressEvent, UpdateInfo } from "./types";
 
 export const listPresets = () => invoke<Preset[]>("list_presets");
 export const savePresets = (presets: Preset[]) => invoke<void>("save_presets", { presetsIn: presets });
@@ -55,3 +55,7 @@ export function onProgress(fn: (ev: ProgressEvent) => void): Promise<UnlistenFn>
 export function onFinished(fn: (total: number) => void): Promise<UnlistenFn> {
   return listen<number>("encode-finished", (e) => fn(e.payload));
 }
+
+/** Hit the GitHub Releases API and report whether a newer version exists.
+ * Never throws — network errors collapse to `update_available: false`. */
+export const checkForUpdates = () => invoke<UpdateInfo>("check_for_updates");
