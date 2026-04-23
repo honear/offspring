@@ -31,7 +31,7 @@ export function onFfmpegDownload(
 export const getCustomLast = () => invoke<Preset>("get_custom_last");
 export const saveCustomLast = (preset: Preset) => invoke<void>("save_custom_last", { preset });
 
-export const syncSendto = () => invoke<void>("sync_sendto");
+export const syncIntegrations = () => invoke<void>("sync_integrations");
 export const openDataFolder = () => invoke<void>("open_data_folder");
 
 export const encode = (files: string[], preset: Preset) =>

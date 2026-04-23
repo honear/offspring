@@ -4,9 +4,9 @@ use tauri::{Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
 use crate::bootstrap;
 use crate::defaults;
 use crate::ffmpeg::{self, ProgressEvent};
+use crate::integration;
 use crate::paths;
 use crate::presets::{self, Preset, Settings};
-use crate::sendto;
 
 #[derive(Serialize)]
 pub struct FfmpegStatus {
@@ -22,7 +22,8 @@ pub fn list_presets() -> Result<Vec<Preset>, String> {
 #[tauri::command]
 pub fn save_presets(presets_in: Vec<Preset>) -> Result<(), String> {
     presets::save_presets(&presets_in).map_err(|e| e.to_string())?;
-    sendto::sync(&presets_in).map_err(|e| e.to_string())?;
+    let settings = presets::load_settings().unwrap_or_default();
+    integration::sync_all(&presets_in, &settings).map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -30,7 +31,8 @@ pub fn save_presets(presets_in: Vec<Preset>) -> Result<(), String> {
 pub fn reset_presets_to_defaults() -> Result<Vec<Preset>, String> {
     let d = defaults::default_presets();
     presets::save_presets(&d).map_err(|e| e.to_string())?;
-    sendto::sync(&d).map_err(|e| e.to_string())?;
+    let settings = presets::load_settings().unwrap_or_default();
+    integration::sync_all(&d, &settings).map_err(|e| e.to_string())?;
     Ok(d)
 }
 
@@ -41,7 +43,13 @@ pub fn get_settings() -> Result<Settings, String> {
 
 #[tauri::command]
 pub fn save_settings(settings: Settings) -> Result<(), String> {
-    presets::save_settings(&settings).map_err(|e| e.to_string())
+    presets::save_settings(&settings).map_err(|e| e.to_string())?;
+    // Toggling sendto / modern-menu should take effect immediately rather
+    // than at next first-run, so re-sync integrations against the new
+    // settings now.
+    let ps = presets::load_presets().unwrap_or_default();
+    integration::sync_all(&ps, &settings).map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 /// Kick off an FFmpeg download in the background. Progress arrives on the
@@ -72,10 +80,15 @@ pub fn save_custom_last(preset: Preset) -> Result<(), String> {
     presets::save_custom_last(&preset).map_err(|e| e.to_string())
 }
 
+/// Re-apply every shell integration (context menu, SendTo, modern menu)
+/// from current on-disk state. Exposed so Settings UI can offer a
+/// "Re-sync right-click menus" button when things drift — e.g. the user
+/// deleted a shortcut manually and wants it back.
 #[tauri::command]
-pub fn sync_sendto() -> Result<(), String> {
+pub fn sync_integrations() -> Result<(), String> {
     let ps = presets::load_presets().map_err(|e| e.to_string())?;
-    sendto::sync(&ps).map_err(|e| e.to_string())
+    let settings = presets::load_settings().unwrap_or_default();
+    integration::sync_all(&ps, &settings).map_err(|e| e.to_string())
 }
 
 #[tauri::command]

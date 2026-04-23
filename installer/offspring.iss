@@ -57,6 +57,13 @@ Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription:
 Source: "{#BinDir}\{#AppExeName}"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\DESIGN.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "scripts\download_ffmpeg.ps1"; DestDir: "{app}\scripts"; Flags: ignoreversion
+; Shell-ext DLL + signed sparse MSIX + public cert, consumed by the
+; modern-menu Settings toggle (Add-AppxPackage runs against them from
+; the app at toggle-on time). The CI workflow copies the DLL from
+; shell-ext/target/release/ into {#BinDir} before iscc runs.
+Source: "{#BinDir}\offspring_shell_ext.dll"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
+Source: "msix\dist\OffspringShellExt.msix"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
+Source: "msix\dist\OffspringShellExt.cer"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 
 [Icons]
 Name: "{group}\{#AppName}"; Filename: "{app}\{#AppExeName}"

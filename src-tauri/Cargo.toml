@@ -23,6 +23,11 @@ dirs = "5"
 anyhow = "1"
 mslnk = "0.1"
 thiserror = "1"
+# Windows registry access for the Explorer right-click submenu. We write a
+# per-user HKCU\Software\Classes\*\shell\Offspring tree with an
+# ExtendedSubCommandsKey pointing at per-preset verbs. See
+# integration/context_menu.rs.
+winreg = "0.55"
 # FFmpeg bootstrap: download the LGPL essentials zip from gyan.dev and
 # unpack it under %LOCALAPPDATA%\Offspring\ffmpeg\. ureq keeps the TLS
 # stack pure-Rust (rustls) so the installer stays self-contained.

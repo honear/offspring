@@ -3,9 +3,9 @@ mod cli;
 mod commands;
 mod defaults;
 mod ffmpeg;
+mod integration;
 mod paths;
 mod presets;
-mod sendto;
 mod updates;
 
 use clap::Parser;
@@ -21,11 +21,12 @@ pub fn run() {
         Some(Command::FirstRun) => {
             let ps = presets::load_presets().unwrap_or_else(|_| defaults::default_presets());
             let _ = presets::save_presets(&ps);
-            let _ = sendto::sync(&ps);
+            let settings = presets::load_settings().unwrap_or_default();
+            let _ = integration::sync_all(&ps, &settings);
             return;
         }
         Some(Command::Cleanup) => {
-            let _ = sendto::cleanup();
+            let _ = integration::cleanup_all();
             return;
         }
         _ => {}
@@ -45,7 +46,7 @@ pub fn run() {
             commands::download_ffmpeg,
             commands::get_custom_last,
             commands::save_custom_last,
-            commands::sync_sendto,
+            commands::sync_integrations,
             commands::open_data_folder,
             commands::encode,
             commands::get_pending_files,
@@ -63,7 +64,8 @@ pub fn run() {
                 if !path.exists() {
                     let ps = defaults::default_presets();
                     let _ = presets::save_presets(&ps);
-                    let _ = sendto::sync(&ps);
+                    let settings = presets::load_settings().unwrap_or_default();
+                    let _ = integration::sync_all(&ps, &settings);
                 }
             }
 
