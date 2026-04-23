@@ -12,3 +12,8 @@ vite.config.ts.timestamp-*
 
 # Inno Setup installer output
 /installer/dist/
+
+# MSIX build artifacts (signed .msix, staged package, private .pfx)
+/installer/msix/dist/
+/installer/msix/stage/
+/installer/msix/.cert/
