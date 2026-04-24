@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { openUrl } from "@tauri-apps/plugin-opener";
+  import { getCurrentWindow } from "@tauri-apps/api/window";
   import FormatFields from "$lib/components/FormatFields.svelte";
   import * as api from "$lib/api";
   import type { Preset, Settings, FfmpegStatus, UpdateInfo } from "$lib/types";
@@ -15,6 +16,13 @@
   let savedTick = $state(0);
   // Right-click menu for preset rows. Non-null when visible.
   let ctxMenu = $state<{ x: number; y: number; preset: Preset } | null>(null);
+
+  // Drag-and-drop reorder state. `dragId` is the preset being dragged;
+  // `dragOver` is the row the cursor is currently over with a position
+  // indicator telling us whether to drop above or below it. The drop-line
+  // is rendered between rows based on this.
+  let dragId = $state<string | null>(null);
+  let dragOver = $state<{ id: string; pos: "above" | "below" } | null>(null);
 
   // FFmpeg download state (fed by the `ffmpeg-download` event from Rust)
   let dl = $state<{
@@ -61,6 +69,19 @@
 
   onMount(async () => {
     await reload();
+
+    // Intercept the window close so the user can't quit on a dirty state
+    // without being warned. We have to register this via Tauri's
+    // onCloseRequested API rather than `beforeunload` — WebView2 on
+    // Windows doesn't fire beforeunload for native window-close actions.
+    await getCurrentWindow().onCloseRequested(async (event) => {
+      if (!dirty) return;
+      const ok = confirm(
+        "You have unsaved changes.\n\n" +
+          "Click OK to close without saving, or Cancel to go back and click 'Save and Sync'.",
+      );
+      if (!ok) event.preventDefault();
+    });
 
     // Fire-and-forget update check. We don't block reload on this, and any
     // failure (no network / private repo / no releases yet) collapses to
@@ -292,15 +313,55 @@
     dirty = true;
   }
 
-  function move(p: Preset, delta: number) {
-    const i = presets.findIndex((x) => x.id === p.id);
-    const j = i + delta;
-    if (j < 0 || j >= presets.length) return;
+  function onDragStart(e: DragEvent, p: Preset) {
+    dragId = p.id;
+    // Required for Firefox; the payload itself is unused since we key off
+    // `dragId` in component state.
+    e.dataTransfer?.setData("text/plain", p.id);
+    if (e.dataTransfer) e.dataTransfer.effectAllowed = "move";
+  }
+
+  function onDragOver(e: DragEvent, p: Preset) {
+    if (!dragId || dragId === p.id) return;
+    e.preventDefault();
+    if (e.dataTransfer) e.dataTransfer.dropEffect = "move";
+    // Above / below split at the row's vertical midpoint so the insertion
+    // point feels natural as the cursor moves past an item.
+    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    const pos: "above" | "below" = e.clientY < rect.top + rect.height / 2 ? "above" : "below";
+    if (!dragOver || dragOver.id !== p.id || dragOver.pos !== pos) {
+      dragOver = { id: p.id, pos };
+    }
+  }
+
+  function onDragLeaveList() {
+    dragOver = null;
+  }
+
+  function onDrop(e: DragEvent, target: Preset) {
+    e.preventDefault();
+    const src = dragId;
+    const over = dragOver;
+    dragId = null;
+    dragOver = null;
+    if (!src || !over || src === target.id) return;
+    const from = presets.findIndex((x) => x.id === src);
+    if (from < 0) return;
     const copy = [...presets];
-    [copy[i], copy[j]] = [copy[j], copy[i]];
+    const [moved] = copy.splice(from, 1);
+    // Re-derive the insertion index against the spliced array, since
+    // removing an earlier element shifts everything after it.
+    let insertBefore = copy.findIndex((x) => x.id === target.id);
+    if (over.pos === "below") insertBefore += 1;
+    copy.splice(insertBefore, 0, moved);
     copy.forEach((x, k) => (x.order = k));
     presets = copy;
     dirty = true;
+  }
+
+  function onDragEnd() {
+    dragId = null;
+    dragOver = null;
   }
 
   async function save() {
@@ -440,7 +501,7 @@
         FFmpeg {ffmpeg.found ? "ready" : "missing"}
       </span>
       {#if dirty}
-        <button class="primary" onclick={save} disabled={saving}>
+        <button class="primary save-pulse" onclick={save} disabled={saving}>
           {saving ? "Saving…" : "Save and Sync"}
         </button>
       {:else if savedTick > 0}
@@ -456,10 +517,19 @@
           <span class="tiny">PRESETS</span>
           <button class="ghost" onclick={addPreset} title="Add preset">+ Add</button>
         </div>
-        <ul class="preset-list">
+        <ul class="preset-list" ondragleave={onDragLeaveList}>
           {#each presets as p (p.id)}
             <li
-              class={selectedId === p.id ? "row-item active" : "row-item"}
+              class="row-item"
+              class:active={selectedId === p.id}
+              class:dragging={dragId === p.id}
+              class:drop-above={dragOver?.id === p.id && dragOver?.pos === "above"}
+              class:drop-below={dragOver?.id === p.id && dragOver?.pos === "below"}
+              draggable="true"
+              ondragstart={(e) => onDragStart(e, p)}
+              ondragover={(e) => onDragOver(e, p)}
+              ondrop={(e) => onDrop(e, p)}
+              ondragend={onDragEnd}
               onclick={() => (selectedId = p.id)}
               oncontextmenu={(e) => {
                 e.preventDefault();
@@ -470,6 +540,7 @@
               role="button"
               tabindex="0"
             >
+              <span class="grip" aria-hidden="true" title="Drag to reorder">≡</span>
               <input
                 type="checkbox"
                 checked={p.enabled}
@@ -482,10 +553,6 @@
               />
               <span class="fmt-tag {p.format}">{p.format.toUpperCase()}</span>
               <span class="preset-name">{p.name}</span>
-              <div class="actions">
-                <button class="ghost tiny-btn" onclick={(e) => { e.stopPropagation(); move(p, -1); }} title="Move up">↑</button>
-                <button class="ghost tiny-btn" onclick={(e) => { e.stopPropagation(); move(p, 1); }} title="Move down">↓</button>
-              </div>
             </li>
           {/each}
         </ul>
@@ -888,18 +955,43 @@
     text-overflow: ellipsis;
     white-space: nowrap;
   }
-  .actions { display: flex; gap: 0; opacity: 0.35; }
-  .row-item:hover .actions,
-  .row-item.active .actions { opacity: 1; }
-  .tiny-btn {
-    padding: 0 4px;
-    min-height: 0;
-    font-size: 11px;
-    border: none;
-    background: transparent;
+  .grip {
+    flex: 0 0 auto;
     color: var(--c-text-3);
+    font-size: 14px;
+    line-height: 1;
+    padding: 0 2px;
+    cursor: grab;
+    user-select: none;
+    opacity: 0.4;
+    transition: opacity 120ms ease;
   }
-  .tiny-btn:hover { color: var(--c-text); background: var(--c-surface-2); }
+  .row-item:hover .grip,
+  .row-item.active .grip { opacity: 1; }
+  .row-item.dragging {
+    opacity: 0.4;
+  }
+  .row-item.drop-above {
+    box-shadow: inset 0 2px 0 0 var(--c-primary);
+  }
+  .row-item.drop-below {
+    box-shadow: inset 0 -2px 0 0 var(--c-primary);
+  }
+  .row-item[draggable="true"] { cursor: pointer; }
+  .row-item[draggable="true"]:active .grip { cursor: grabbing; }
+
+  @keyframes save-pulse-ring {
+    0%   { box-shadow: 0 0 0 0 var(--c-primary-ring); }
+    70%  { box-shadow: 0 0 0 8px rgba(0, 0, 0, 0); }
+    100% { box-shadow: 0 0 0 0 rgba(0, 0, 0, 0); }
+  }
+  .save-pulse {
+    animation: save-pulse-ring 1.6s ease-out infinite;
+  }
+  .save-pulse:hover,
+  .save-pulse:focus-visible {
+    animation: none;
+  }
   .sidebar-foot {
     padding: 6px 10px;
     border-top: 1px solid var(--c-border);
