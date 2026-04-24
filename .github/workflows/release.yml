@@ -1,26 +1,21 @@
 name: Release
 
-# Triggered by pushing a version tag. Example workflow:
-#   1. Bump version in package.json + src-tauri/Cargo.toml + tauri.conf.json
-#      + installer/offspring.iss (AppVersion).
-#   2. git commit -am "chore: bump to 0.3.0"
-#   3. git tag v0.3.0 && git push && git push --tags
-#
-# The job below:
-#   - Builds the Svelte frontend + Rust backend via `npm run tauri build`
-#   - Runs the Inno Setup compiler against installer/offspring.iss to produce
-#     Offspring-Setup-<version>.exe
-#   - Creates a GitHub Release from the pushed tag and attaches the installer
+# Default release flow is LOCAL: build + test via `tools/build-release.ps1`,
+# then publish with `gh release create vX.Y.Z installer/dist/Offspring-Setup-X.Y.Z.exe`.
+# This workflow is kept as a manual fallback (workflow_dispatch) for the
+# occasional rebuild on a clean runner — e.g. to verify a local build was
+# reproducible, or to re-attach an installer to an existing tag from CI.
 #
 # The in-app updater (src-tauri/src/updates.rs) looks for an asset whose name
 # starts with "Offspring-Setup" and ends in ".exe" on the latest release.
 # Don't rename the asset without updating that matcher.
 
 on:
-  push:
-    tags:
-      - "v*.*.*"
   workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to build (e.g. v0.3.15). Must already exist on origin."
+        required: true
 
 permissions:
   contents: write  # required to create releases and upload assets
@@ -36,12 +31,14 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag }}
 
       - name: Derive version from tag
         id: ver
         shell: bash
         run: |
-          TAG="${GITHUB_REF_NAME}"
+          TAG="${{ github.event.inputs.tag }}"
           VERSION="${TAG#v}"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "tag=$TAG"           >> "$GITHUB_OUTPUT"
