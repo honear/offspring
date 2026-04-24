@@ -5,8 +5,10 @@
 //!
 //! * `context_menu` — writes `HKCU\Software\Classes\*\shell\Offspring` with
 //!   an `ExtendedSubCommandsKey` pointing at per-preset verbs. This is the
-//!   classic ("Show more options") right-click menu. Always on; it's the
-//!   default surface that replaces SendTo for Windows 11 users.
+//!   classic ("Show more options") right-click menu. Default-on, but
+//!   automatically disabled when `modern_menu` is enabled — otherwise the
+//!   two surfaces stack (modern entry at the top level AND classic entry
+//!   under "Show more options"), which looks like a duplicate install.
 //!
 //! * `sendto` — writes .lnk files into the user's SendTo folder. Opt-in via
 //!   `Settings.sendto_enabled`. Off by default because SendTo is buried
@@ -37,18 +39,23 @@ use crate::presets::{Preset, Settings};
 /// they previously installed — so flipping a toggle off in Settings
 /// cleans up immediately instead of at uninstall time.
 pub fn sync_all(presets: &[Preset], settings: &Settings) -> Result<()> {
-    context_menu::sync(presets)?;
+    // Modern menu and classic menu are mutually exclusive. If we wrote both,
+    // Windows 11 would show the modern entry at the top level AND the
+    // classic submenu under "Show more options" — same app, two menus. The
+    // modern toggle claims the top slot; the classic registry submenu is
+    // only installed when modern is off.
+    if settings.modern_menu_enabled.unwrap_or(false) {
+        context_menu::cleanup()?;
+        modern_menu::sync(presets)?;
+    } else {
+        modern_menu::cleanup()?;
+        context_menu::sync(presets)?;
+    }
 
     if settings.sendto_enabled.unwrap_or(false) {
         sendto::sync(presets)?;
     } else {
         sendto::cleanup()?;
-    }
-
-    if settings.modern_menu_enabled.unwrap_or(false) {
-        modern_menu::sync(presets)?;
-    } else {
-        modern_menu::cleanup()?;
     }
 
     Ok(())

@@ -602,8 +602,9 @@
       <div class="card">
         <h3>Right-click menu</h3>
         <p class="muted tiny">
-          Offspring always adds a submenu under Windows 11's "Show more options" (the classic right-click menu).
-          These toggles control the two extra surfaces.
+          By default, Offspring lives under Windows 11's "Show more options" (the classic right-click menu).
+          Enabling the modern menu below moves it to the top-level right-click menu — it won't also appear
+          under "Show more options", so you don't end up with two entries.
         </p>
         <div style="margin-top: 12px; display: flex; flex-direction: column; gap: 10px;">
           <label class="inline">
