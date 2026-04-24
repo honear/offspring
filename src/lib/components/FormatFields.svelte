@@ -83,6 +83,30 @@
       placeholder="no limit"
     />
   </div>
+  <div class="full">
+    <label class="inline">
+      <input
+        type="checkbox"
+        checked={preset.grayscale ?? false}
+        onchange={(e) => {
+          preset.grayscale = (e.currentTarget as HTMLInputElement).checked;
+        }}
+      />
+      Greyscale (desaturate output)
+    </label>
+  </div>
+  <div class="full">
+    <label class="inline" title="Burns the frame number in the top-left corner using Consolas.">
+      <input
+        type="checkbox"
+        checked={preset.timecode ?? false}
+        onchange={(e) => {
+          preset.timecode = (e.currentTarget as HTMLInputElement).checked;
+        }}
+      />
+      Burn-in frame number (timecode)
+    </label>
+  </div>
 </div>
 
 {#if preset.format === "gif"}

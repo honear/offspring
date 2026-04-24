@@ -1,5 +1,6 @@
 use anyhow::{anyhow, bail, Context, Result};
 use serde::Serialize;
+use std::ffi::OsString;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -8,7 +9,123 @@ use std::process::{Command, Stdio};
 use std::os::windows::process::CommandExt;
 
 use crate::paths;
-use crate::presets::{Crop, Dither, Format, Preset, Settings};
+use crate::presets::{
+    Crop, Dither, Format, GuidesConfig, OverlayConfig, OverlaySlotKind, Preset, Settings,
+};
+use crate::sequence::SequenceInfo;
+
+/// Shapes of ffmpeg input we support.
+///   * `File` — classic one-file encode.
+///   * `Sequence` — image sequence via the `image2` demuxer.
+///   * `Concat` — N videos glued via the `concat` demuxer. The caller
+///     is responsible for writing the listing file to disk at
+///     `list_path` before passing this in, and cleaning it up after.
+#[derive(Debug, Clone)]
+pub enum EncodeInput {
+    File(PathBuf),
+    /// fps is the rate the sequence is fed INTO ffmpeg — the encoded
+    /// output framerate is still governed by the preset's `fps` filter.
+    /// Callers typically pass the same value for both so input and
+    /// output timing line up 1:1. f32 because VFX rates like 23.976
+    /// and 29.97 aren't representable as integers; the image2 demuxer
+    /// accepts decimals directly after `-framerate`.
+    Sequence { info: SequenceInfo, fps: f32 },
+    Concat {
+        /// Text file listing `file '<path>'` lines. Written by the
+        /// caller; ffmpeg reads it via the concat demuxer.
+        list_path: PathBuf,
+        /// Where the final output should land.
+        output_dir: PathBuf,
+        /// Base name (no extension) for the output file.
+        output_stem: String,
+        /// Pre-computed sum of input durations for the progress bar.
+        /// None if any ffprobe call failed — progress just won't show
+        /// a percentage in that case.
+        total_duration_s: Option<f64>,
+    },
+}
+
+impl EncodeInput {
+    /// Ffmpeg input arg list. For files that's just `-i <path>`. For
+    /// sequences we prepend `-framerate` + `-start_number` because the
+    /// image2 demuxer needs those before `-i` to interpret the pattern.
+    fn input_args(&self) -> Vec<OsString> {
+        match self {
+            Self::File(p) => vec![OsString::from("-i"), p.as_os_str().to_owned()],
+            Self::Sequence { info, fps } => vec![
+                OsString::from("-framerate"),
+                // f32's Display trims the trailing zero on whole numbers
+                // (24.0 → "24") and keeps the fraction for decimals
+                // (23.976 → "23.976"), which is exactly what ffmpeg
+                // wants after `-framerate`.
+                OsString::from(fps.to_string()),
+                OsString::from("-start_number"),
+                OsString::from(info.start_number.to_string()),
+                OsString::from("-i"),
+                info.ffmpeg_input_pattern().into_os_string(),
+            ],
+            Self::Concat { list_path, .. } => vec![
+                OsString::from("-f"),
+                OsString::from("concat"),
+                OsString::from("-safe"),
+                OsString::from("0"),
+                OsString::from("-i"),
+                list_path.as_os_str().to_owned(),
+            ],
+        }
+    }
+
+    /// Directory the output file should land in.
+    fn output_dir(&self) -> PathBuf {
+        match self {
+            Self::File(p) => p.parent().unwrap_or(Path::new(".")).to_path_buf(),
+            Self::Sequence { info, .. } => info.dir.clone(),
+            Self::Concat { output_dir, .. } => output_dir.clone(),
+        }
+    }
+
+    /// Base name (no extension, no suffix) for the output file.
+    fn output_stem(&self) -> String {
+        match self {
+            Self::File(p) => p
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("output")
+                .to_string(),
+            Self::Sequence { info, .. } => info.output_stem(),
+            Self::Concat { output_stem, .. } => output_stem.clone(),
+        }
+    }
+
+    /// Human-readable label used in progress events. For non-file
+    /// variants we stringify the pattern / list path so the progress UI
+    /// still shows something recognizable rather than a blank.
+    pub fn display(&self) -> String {
+        match self {
+            Self::File(p) => p.display().to_string(),
+            Self::Sequence { info, .. } => info.ffmpeg_input_pattern().display().to_string(),
+            Self::Concat { output_stem, .. } => format!("merge: {output_stem}"),
+        }
+    }
+
+    /// Best-effort clip duration. Files fall back to ffprobe. Sequences
+    /// compute from frame_count / fps directly — ffprobe can be flaky on
+    /// `%04d` patterns and we already have the numbers. Concat reuses
+    /// the summed duration the caller already computed.
+    pub fn duration_hint(&self, ffmpeg: &Path) -> Option<f64> {
+        match self {
+            Self::File(p) => probe_duration(ffmpeg, p),
+            Self::Sequence { info, fps } => {
+                if *fps <= 0.0 {
+                    None
+                } else {
+                    Some(info.frame_count as f64 / *fps as f64)
+                }
+            }
+            Self::Concat { total_duration_s, .. } => *total_duration_s,
+        }
+    }
+}
 
 /// Windows flag that prevents the child process from ever opening a console
 /// window. Our parent process is a GUI (Tauri) binary, but FFmpeg/ffprobe
@@ -55,14 +172,49 @@ fn which(name: &str) -> Option<PathBuf> {
     None
 }
 
-pub fn output_path(input: &Path, preset: &Preset) -> PathBuf {
+pub fn output_path(input: &EncodeInput, preset: &Preset) -> PathBuf {
     let ext = match preset.format {
         Format::Gif => "gif",
         Format::Mp4 => "mp4",
     };
-    let parent = input.parent().unwrap_or(Path::new("."));
-    let stem = input.file_stem().and_then(|s| s.to_str()).unwrap_or("output");
-    parent.join(format!("{stem}{}.{ext}", preset.suffix))
+    let base = input
+        .output_dir()
+        .join(format!("{}{}.{ext}", input.output_stem(), preset.suffix));
+    unique_output_path(&base)
+}
+
+/// If `path` doesn't exist, return it. Otherwise return the first
+/// `<stem>_NN.<ext>` (NN = 01, 02, …) that doesn't exist. Keeps every
+/// encode non-destructive — re-running a preset on the same input stacks
+/// outputs instead of silently overwriting the previous result.
+///
+/// The suffix starts at `_01` so the first collision becomes
+/// `foo_01.mp4`, which reads as "the next copy" rather than "a missing
+/// zeroth". Hard cap at 99 — if someone genuinely has 99 identically
+/// named encodes in one folder they have bigger problems, and returning
+/// the original path at that point means ffmpeg will overwrite rather
+/// than loop forever.
+pub fn unique_output_path(path: &Path) -> PathBuf {
+    if !path.exists() {
+        return path.to_path_buf();
+    }
+    let parent = path.parent().unwrap_or(Path::new("."));
+    let stem = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("output");
+    let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("");
+    for n in 1..=99u32 {
+        let candidate = if ext.is_empty() {
+            parent.join(format!("{stem}_{n:02}"))
+        } else {
+            parent.join(format!("{stem}_{n:02}.{ext}"))
+        };
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+    path.to_path_buf()
 }
 
 fn crop_expr(c: &Crop) -> &'static str {
@@ -94,7 +246,287 @@ fn build_filter_chain(preset: &Preset) -> String {
     if let Some(s) = scale_expr(preset) {
         parts.push(s);
     }
+    if preset.grayscale.unwrap_or(false) {
+        // `format=gray` is a one-pass desaturate that the encoder still
+        // re-packs to yuv420p afterwards (the `-pix_fmt yuv420p` arg
+        // later in the MP4 path handles that). Placed last so any
+        // upstream crop/scale runs on the original color data.
+        parts.push("format=gray".to_string());
+    }
+    if let Some(ref g) = preset.guides {
+        parts.extend(guides_filters(g));
+    }
+    if let Some(ref o) = preset.overlay {
+        parts.extend(overlay_filters(o));
+    }
+    if preset.timecode.unwrap_or(false) {
+        parts.push(timecode_filter());
+    }
     parts.join(",")
+}
+
+/// Burn-in drawtext for the current frame number. Uses Windows'
+/// stock Consolas font — guaranteed on Win7+, zero-byte bundle cost.
+/// The `:` in the `C:/...` path is ffmpeg's parameter separator, so
+/// we escape it with `\:` (written `\\:` in the Rust source).
+fn timecode_filter() -> String {
+    r"drawtext=fontfile='C\:/Windows/Fonts/consola.ttf':text='%{frame_num}':fontcolor=white:fontsize=h/20:x=12:y=12:box=1:boxcolor=black@0.55:boxborderw=6".to_string()
+}
+
+/// drawbox + drawtext filters for the guide boxes. One box per enabled
+/// ratio, sized to fit within the source frame (letterbox logic) so the
+/// box represents the final crop window for each aspect. Each box is
+/// followed by a small label (`16:9`, `9:16`, `4:5`) pinned to its
+/// top-right corner. Opacity comes from [`GuidesConfig::opacity`].
+pub(crate) fn guides_filters(g: &GuidesConfig) -> Vec<String> {
+    let mut out = Vec::new();
+    let a = g.opacity.clamp(0.0, 1.0);
+    if g.show_16_9 {
+        out.extend(guide_box_with_label("16/9", "16:9", &color_with_alpha(&g.color_16_9, a)));
+    }
+    if g.show_9_16 {
+        out.extend(guide_box_with_label("9/16", "9:16", &color_with_alpha(&g.color_9_16, a)));
+    }
+    if g.show_4_5 {
+        out.extend(guide_box_with_label("4/5", "4:5", &color_with_alpha(&g.color_4_5, a)));
+    }
+    out
+}
+
+/// Return an ffmpeg-parseable color string with the given alpha baked in.
+/// Normalizes the caller's color so a stray `#rrggbb` (which the HTML
+/// color picker emits and which occasionally leaks past the UI-side
+/// `0x…` conversion) becomes `0xrrggbb` — ffmpeg's drawbox parses `#` too
+/// but it's less robust across versions, and we've tripped on it before.
+/// Empty strings fall back to white rather than producing `@0.9` alone,
+/// which ffmpeg rejects with a filter-init error.
+fn color_with_alpha(c: &str, alpha: f32) -> String {
+    let a = alpha.clamp(0.0, 1.0);
+    let trimmed = c.trim();
+    let base: String = if trimmed.is_empty() {
+        "white".to_string()
+    } else if let Some(rest) = trimmed.strip_prefix('#') {
+        format!("0x{rest}")
+    } else {
+        trimmed.to_string()
+    };
+    // Honor any pre-existing `@` (e.g. if a preset explicitly pinned the
+    // alpha) by leaving the caller's value alone.
+    if base.contains('@') {
+        base
+    } else {
+        format!("{base}@{a:.2}")
+    }
+}
+
+/// Emit a drawbox + a drawtext label, both sized/placed relative to the
+/// largest rect of the given aspect that fits inside the source frame
+/// (centered). `ratio` is a fraction literal like "16/9"; `label` is
+/// human-readable like "16:9" (colons will be escaped for drawtext).
+fn guide_box_with_label(ratio: &str, label: &str, color: &str) -> Vec<String> {
+    // Commas inside if() arguments are filter-graph separators, so they
+    // must be backslash-escaped. drawbox's `x` / `y` expressions can
+    // reference the computed `w` / `h`, so we compute box dims by
+    // comparing source aspect to target, then center.
+    let box_filter = format!(
+        "drawbox=w=if(gt(iw/ih\\,{r})\\,ih*{r}\\,iw):h=if(gt(iw/ih\\,{r})\\,ih\\,iw/({r})):x=(iw-w)/2:y=(ih-h)/2:color={c}:thickness=3",
+        r = ratio,
+        c = color,
+    );
+
+    // Label lives at the top-right inside the box. The box rect isn't
+    // addressable by name in drawtext, so we inline the same box-width
+    // expression and offset by `tw` (text width) + a small margin.
+    //
+    // drawtext's x/y expressions DO NOT accept `iw`/`ih` (those are
+    // drawbox-only). The equivalents in drawtext are `W`/`H` — the
+    // padded input width/height. Using `iw`/`ih` here makes the filter
+    // parser fail with "Undefined constant or missing '(' in
+    // 'iw/ih,<r>),...'" which kills the whole encode.
+    let label_escaped = escape_drawtext_literal(label);
+    let bw = format!("if(gt(W/H\\,{r})\\,H*{r}\\,W)", r = ratio);
+    let bh = format!("if(gt(W/H\\,{r})\\,H\\,W/({r}))", r = ratio);
+    let x_expr = format!("(W-{bw})/2+{bw}-tw-8");
+    let y_expr = format!("(H-{bh})/2+6");
+    let label_filter = format!(
+        "drawtext=fontfile='C\\:/Windows/Fonts/consola.ttf':text='{text}':fontcolor={c}:fontsize=h/40:x={x}:y={y}:box=1:boxcolor=black@0.45:boxborderw=3",
+        text = label_escaped,
+        c = color,
+        x = x_expr,
+        y = y_expr,
+    );
+
+    vec![box_filter, label_filter]
+}
+
+/// Build the filter segments for the Overlay tool. Emits (in order):
+/// optional `drawbox` guide boxes drawn on the source-sized frame, an
+/// optional `pad` adding black bars top+bottom for the border mode, and
+/// one `drawtext` per non-empty corner. Guides run BEFORE pad so the
+/// aspect boxes hug the image, not the black border strips. Corners +
+/// border are gated on `cfg.metadata` (the "Add metadata" toggle);
+/// guides themselves are gated by the per-ratio booleans inside
+/// `cfg.guides`, so an all-false GuidesConfig emits nothing.
+pub(crate) fn overlay_filters(cfg: &OverlayConfig) -> Vec<String> {
+    let mut out = Vec::new();
+
+    // Guide boxes over the un-padded image, using the guides config's
+    // per-ratio colors so picker changes propagate here too.
+    out.extend(guides_filters(&cfg.guides));
+
+    if !cfg.metadata {
+        return out;
+    }
+
+    // Border: pad with an equal black strip on ALL FOUR sides (ih/10 on
+    // each). Equal borders keep the output visually balanced even when
+    // the left/right strips have no text to carry. Must run AFTER the
+    // guide boxes so the guides hug the image, not the padding.
+    if cfg.border {
+        out.push("pad=iw+2*(ih/10):ih+2*(ih/10):(ih/10):(ih/10):color=black".to_string());
+    }
+
+    // One drawtext per corner. Timecode slots bypass the literal-text
+    // escape path so the `%{frame_num}` expansion survives.
+    let corners: [(&OverlaySlotKind, &str); 4] = [
+        (&cfg.top_left, "tl"),
+        (&cfg.top_right, "tr"),
+        (&cfg.bottom_left, "bl"),
+        (&cfg.bottom_right, "br"),
+    ];
+    for (slot, corner) in corners {
+        match slot {
+            OverlaySlotKind::None => {}
+            OverlaySlotKind::Filename => {
+                if !cfg.filename.is_empty() {
+                    out.push(overlay_drawtext(
+                        &escape_drawtext_literal(&cfg.filename),
+                        corner,
+                        &cfg.color,
+                        cfg.opacity,
+                        cfg.border,
+                        cfg.font_scale,
+                    ));
+                }
+            }
+            OverlaySlotKind::Timecode => {
+                // `%{frame_num}` is an ffmpeg expansion — must not be
+                // escaped. The literal braces are fine inside single
+                // quotes.
+                out.push(overlay_drawtext(
+                    "%{frame_num}",
+                    corner,
+                    &cfg.color,
+                    cfg.opacity,
+                    cfg.border,
+                    cfg.font_scale,
+                ));
+            }
+            OverlaySlotKind::Custom => {
+                let t = cfg.custom_text.trim();
+                if !t.is_empty() {
+                    out.push(overlay_drawtext(
+                        &escape_drawtext_literal(t),
+                        corner,
+                        &cfg.color,
+                        cfg.opacity,
+                        cfg.border,
+                        cfg.font_scale,
+                    ));
+                }
+            }
+            OverlaySlotKind::Custom2 => {
+                let t = cfg.custom_text_2.trim();
+                if !t.is_empty() {
+                    out.push(overlay_drawtext(
+                        &escape_drawtext_literal(t),
+                        corner,
+                        &cfg.color,
+                        cfg.opacity,
+                        cfg.border,
+                        cfg.font_scale,
+                    ));
+                }
+            }
+        }
+    }
+
+    out
+}
+
+/// Build one drawtext filter for a given corner. `text_expr` must
+/// already be escaped for drawtext's `text=` value (call
+/// [`escape_drawtext_literal`] for user strings; pass expansions like
+/// `%{frame_num}` verbatim). When `border` is true, x positions are
+/// pulled inward by the border width (`h/12` in post-pad coordinates)
+/// so text lands on the image rather than in the left/right black
+/// strips of the equal-border pad.
+fn overlay_drawtext(
+    text_expr: &str,
+    corner: &str,
+    color: &str,
+    opacity: f32,
+    border: bool,
+    font_scale: f32,
+) -> String {
+    // Everything scales off `s`: fontsize (smaller divisor = larger text),
+    // vertical margin (same), horizontal pixel pad, and the drawtext box
+    // border width. Clamped so extreme slider values don't produce filter
+    // strings that ffmpeg rejects (e.g. `fontsize=h/0.00`).
+    let s = font_scale.clamp(0.3, 4.0);
+    let font_div = 25.0 / s;
+    let y_margin_div = 30.0 / s;
+    let x_pad = ((12.0 * s).round() as u32).max(1);
+    let box_bw = ((6.0 * s).round() as u32).max(1);
+    // Border strip is a fixed fraction of the padded frame (`h/12` in
+    // post-pad coords), so its thickness doesn't scale with font size —
+    // only the inner text margin (`x_pad`) inside that strip does.
+    let (x, y) = if border {
+        match corner {
+            "tl" => (format!("h/12+{x_pad}"), format!("h/{y_margin_div:.2}")),
+            "tr" => (format!("w-h/12-tw-{x_pad}"), format!("h/{y_margin_div:.2}")),
+            "bl" => (format!("h/12+{x_pad}"), format!("h-th-h/{y_margin_div:.2}")),
+            "br" => (format!("w-h/12-tw-{x_pad}"), format!("h-th-h/{y_margin_div:.2}")),
+            _ => (format!("h/12+{x_pad}"), format!("h/{y_margin_div:.2}")),
+        }
+    } else {
+        match corner {
+            "tl" => (format!("{x_pad}"), format!("h/{y_margin_div:.2}")),
+            "tr" => (format!("w-tw-{x_pad}"), format!("h/{y_margin_div:.2}")),
+            "bl" => (format!("{x_pad}"), format!("h-th-h/{y_margin_div:.2}")),
+            "br" => (format!("w-tw-{x_pad}"), format!("h-th-h/{y_margin_div:.2}")),
+            _ => (format!("{x_pad}"), format!("h/{y_margin_div:.2}")),
+        }
+    };
+    let a = opacity.clamp(0.0, 1.0);
+    format!(
+        "drawtext=fontfile='C\\:/Windows/Fonts/consola.ttf':text='{text}':fontcolor={color}@{a:.2}:fontsize=h/{font_div:.2}:x={x}:y={y}:box=1:boxcolor=black@{box_a:.2}:boxborderw={box_bw}",
+        text = text_expr,
+        color = color,
+        a = a,
+        x = x,
+        y = y,
+        box_a = (a * 0.55).clamp(0.0, 1.0),
+    )
+}
+
+/// Escape a literal string for drawtext `text='...'`. We wrap text in
+/// single quotes in the filter, so we escape: backslash, single-quote,
+/// colon (ffmpeg param separator), percent (format expansion), comma
+/// (filter-graph separator).
+fn escape_drawtext_literal(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 4);
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '\'' => out.push_str("\\'"),
+            ':' => out.push_str("\\:"),
+            '%' => out.push_str("\\%"),
+            ',' => out.push_str("\\,"),
+            _ => out.push(c),
+        }
+    }
+    out
 }
 
 fn dither_arg(d: &Dither, bayer_scale: Option<u32>) -> String {
@@ -146,7 +578,7 @@ pub struct ProgressEvent {
 
 pub fn encode_file(
     ffmpeg: &Path,
-    input: &Path,
+    input: &EncodeInput,
     preset: &Preset,
     settings: &Settings,
     duration_s: Option<f64>,
@@ -157,6 +589,7 @@ pub fn encode_file(
     let out = output_path(input, preset);
     let verbosity = settings.verbosity.clone().unwrap_or_else(|| "warning".into());
     let target_mb = preset.target_max_mb;
+    let input_display = input.display();
 
     match preset.format {
         Format::Gif => {
@@ -232,14 +665,17 @@ pub fn encode_file(
             on_progress(ProgressEvent {
                 file_index,
                 total_files,
-                input: input.display().to_string(),
+                input: input_display.clone(),
                 stage: "encode".into(),
                 percent: None,
                 message: Some(stage_msg),
             });
 
             let mut cmd = Command::new(ffmpeg);
-            cmd.args(["-v", &verbosity, "-y", "-hide_banner", "-i"]).arg(input);
+            cmd.args(["-v", &verbosity, "-y", "-hide_banner"]);
+            for a in input.input_args() {
+                cmd.arg(a);
+            }
             if !filter.is_empty() {
                 cmd.args(["-vf", &filter]);
             }
@@ -256,16 +692,28 @@ pub fn encode_file(
                 cmd.args(["-crf", &crf.to_string()]);
             }
             cmd.args(["-c:a", "aac", "-b:a", &abr]);
-            cmd.args(["-movflags", "+faststart"]);
+            // `-pix_fmt yuv420p` is load-bearing for Windows Explorer's
+            // thumbnail service — RGB24/RGBA sources (PNG sequences, EXR
+            // renders) otherwise encode as yuv444p, which the shell
+            // thumbnailer can't decode and renders as a corrupt frame.
+            // yuv420p is the universal-compat default and harmless for
+            // normal video inputs too.
+            cmd.args(["-pix_fmt", "yuv420p", "-movflags", "+faststart"]);
+            // Image sequences have no audio track — skip the AAC encoder
+            // so ffmpeg doesn't log a spurious warning, and so the output
+            // stream layout exactly matches what the encoder produced.
+            if matches!(input, EncodeInput::Sequence { .. }) {
+                cmd.arg("-an");
+            }
             cmd.args(["-progress", "pipe:1"]).arg(&out);
-            run_with_progress(cmd, duration_s, file_index, total_files, input, "encode", &mut on_progress)?;
+            run_with_progress(cmd, duration_s, file_index, total_files, &input_display, "encode", &mut on_progress)?;
         }
     }
 
     on_progress(ProgressEvent {
         file_index,
         total_files,
-        input: input.display().to_string(),
+        input: input_display,
         stage: "done".into(),
         percent: Some(1.0),
         message: Some(out.display().to_string()),
@@ -279,7 +727,7 @@ fn run_with_progress(
     duration_s: Option<f64>,
     file_index: usize,
     total_files: usize,
-    input: &Path,
+    input_display: &str,
     stage: &str,
     on_progress: &mut impl FnMut(ProgressEvent),
 ) -> Result<()> {
@@ -297,7 +745,7 @@ fn run_with_progress(
                 on_progress(ProgressEvent {
                     file_index,
                     total_files,
-                    input: input.display().to_string(),
+                    input: input_display.to_string(),
                     stage: stage.into(),
                     percent: Some(pct),
                     message: None,
@@ -318,7 +766,7 @@ fn run_with_progress(
 #[allow(clippy::too_many_arguments)]
 fn encode_gif_once(
     ffmpeg: &Path,
-    input: &Path,
+    input: &EncodeInput,
     preset: &Preset,
     width_override: Option<u32>,
     verbosity: &str,
@@ -329,6 +777,7 @@ fn encode_gif_once(
     on_progress: &mut impl FnMut(ProgressEvent),
     extra_msg: Option<String>,
 ) -> Result<()> {
+    let input_display = input.display();
     let palette_colors = preset.palette_colors.unwrap_or(128);
     let dither = preset.dither.clone().unwrap_or(Dither::Bayer);
 
@@ -348,10 +797,42 @@ fn encode_gif_once(
         (None, Some(h)) => parts.push(format!("scale=-2:{h}:flags=lanczos")),
         (None, None) => {}
     }
+    if preset.grayscale.unwrap_or(false) {
+        // Runs before palettegen so the generated palette contains only
+        // grey tones — avoids spurious colored dithering when the
+        // source happens to have a few stray non-grey pixels.
+        parts.push("format=gray".to_string());
+    }
+    if let Some(ref g) = preset.guides {
+        parts.extend(guides_filters(g));
+    }
+    if let Some(ref o) = preset.overlay {
+        parts.extend(overlay_filters(o));
+    }
+    if preset.timecode.unwrap_or(false) {
+        parts.push(timecode_filter());
+    }
     let filter = parts.join(",");
 
     // Pass 1: palette
-    let palette_tmp = out.with_extension("palette.png");
+    //
+    // Previous versions wrote the palette next to the output file. That
+    // breaks on read-only source folders (rare) and races with cloud sync
+    // clients (common — OneDrive/Dropbox briefly lock newly-created files
+    // in watched folders, so the first encode after a sync event fails
+    // while the second succeeds because the file is already known). Stage
+    // under LOCALAPPDATA instead, with pid + timestamp to avoid two
+    // concurrent encodes stomping each other's palette.
+    let palette_tmp = {
+        let stem = out.file_stem().and_then(|s| s.to_str()).unwrap_or("out");
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        crate::paths::tmp_dir()
+            .unwrap_or_else(|_| std::env::temp_dir())
+            .join(format!("{stem}.{}.{nonce}.palette.png", std::process::id()))
+    };
     let mut filter_p1 = filter.clone();
     if !filter_p1.is_empty() {
         filter_p1.push(',');
@@ -363,7 +844,7 @@ fn encode_gif_once(
     on_progress(ProgressEvent {
         file_index,
         total_files,
-        input: input.display().to_string(),
+        input: input_display.clone(),
         stage: "palette".into(),
         percent: None,
         message: Some(
@@ -374,15 +855,27 @@ fn encode_gif_once(
     });
 
     let mut palette_cmd = Command::new(ffmpeg);
+    palette_cmd.args(["-v", verbosity, "-y"]);
+    for a in input.input_args() {
+        palette_cmd.arg(a);
+    }
     palette_cmd
-        .args(["-v", verbosity, "-y", "-i"])
-        .arg(input)
         .args(["-vf", &filter_p1])
         .arg(&palette_tmp)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     hide_console(&mut palette_cmd);
+    // Delete the palette on every exit from this function (success, error,
+    // or panic unwind) so we don't leak temp PNGs across crashed encodes.
+    struct PaletteGuard(PathBuf);
+    impl Drop for PaletteGuard {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+    let _palette_guard = PaletteGuard(palette_tmp.clone());
+
     let status = palette_cmd
         .status()
         .context("spawning ffmpeg for palette pass")?;
@@ -404,16 +897,18 @@ fn encode_gif_once(
     on_progress(ProgressEvent {
         file_index,
         total_files,
-        input: input.display().to_string(),
+        input: input_display.clone(),
         stage: "encode".into(),
         percent: None,
         message: Some(extra_msg.unwrap_or_else(|| "Encoding GIF".into())),
     });
 
     let mut cmd = Command::new(ffmpeg);
-    cmd.args(["-v", verbosity, "-y", "-hide_banner", "-i"])
-        .arg(input)
-        .arg("-i")
+    cmd.args(["-v", verbosity, "-y", "-hide_banner"]);
+    for a in input.input_args() {
+        cmd.arg(a);
+    }
+    cmd.arg("-i")
         .arg(&palette_tmp)
         .args(["-filter_complex", &filter_complex])
         .args(["-progress", "pipe:1"])
@@ -423,12 +918,12 @@ fn encode_gif_once(
         duration_s,
         file_index,
         total_files,
-        input,
+        &input_display,
         "encode",
         on_progress,
     )?;
 
-    let _ = std::fs::remove_file(&palette_tmp);
+    // `_palette_guard` drops here and removes the temp palette.
     Ok(())
 }
 
@@ -447,3 +942,561 @@ pub fn probe_duration(ffmpeg: &Path, input: &Path) -> Option<f64> {
     let s = String::from_utf8_lossy(&out.stdout);
     s.trim().parse::<f64>().ok()
 }
+
+/// Shape of the first-file probe that feeds the Merge tool's ad-hoc
+/// preset. All fields are best-effort — missing values fall back to
+/// sensible defaults in [`derive_merge_preset`].
+#[derive(Debug, Clone, Default)]
+pub struct VideoProbe {
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+    pub fps: Option<u32>,
+}
+
+/// Probe the first video stream of `input` for dimensions + fps. Used by
+/// Merge to build an output that matches the first file in the selection.
+/// Returns `VideoProbe::default()` (all-None) if ffprobe isn't available
+/// or the file has no video stream we can read — the caller falls back
+/// to reasonable defaults.
+pub fn probe_video(ffmpeg: &Path, input: &Path) -> VideoProbe {
+    let probe = ffmpeg.with_file_name("ffprobe.exe");
+    if !probe.exists() {
+        return VideoProbe::default();
+    }
+    let mut cmd = Command::new(&probe);
+    cmd.args([
+        "-v", "error",
+        "-select_streams", "v:0",
+        "-show_entries", "stream=width,height,avg_frame_rate,r_frame_rate",
+        "-of", "default=nw=1",
+    ])
+    .arg(input)
+    .stdin(Stdio::null())
+    .stderr(Stdio::null());
+    hide_console(&mut cmd);
+    let Ok(out) = cmd.output() else { return VideoProbe::default() };
+    let text = String::from_utf8_lossy(&out.stdout);
+
+    let mut p = VideoProbe::default();
+    for line in text.lines() {
+        let Some((k, v)) = line.split_once('=') else { continue };
+        match k.trim() {
+            "width" => p.width = v.trim().parse().ok(),
+            "height" => p.height = v.trim().parse().ok(),
+            // `avg_frame_rate` wins when present (actual playback rate);
+            // fall back to `r_frame_rate` (declared rate) if we only saw
+            // that one. GIF files typically only publish r_frame_rate.
+            "avg_frame_rate" | "r_frame_rate" => {
+                if p.fps.is_none() {
+                    if let Some((num, den)) = v.trim().split_once('/') {
+                        let n: f64 = num.parse().unwrap_or(0.0);
+                        let d: f64 = den.parse().unwrap_or(0.0);
+                        if d > 0.0 && n > 0.0 {
+                            p.fps = Some((n / d).round() as u32);
+                        }
+                    } else if let Ok(n) = v.trim().parse::<f64>() {
+                        if n > 0.0 {
+                            p.fps = Some(n.round() as u32);
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    p
+}
+
+/// Probe whether `input` has at least one audio stream. Used by the
+/// merge-via-concat-filter path to decide whether to splice audio into
+/// the concat graph. Conservative: returns `false` if ffprobe is
+/// missing or the call fails, so the fallback (video-only merge)
+/// always runs rather than silently dropping to a broken audio graph.
+fn has_audio_stream(ffmpeg: &Path, input: &Path) -> bool {
+    let probe = ffmpeg.with_file_name("ffprobe.exe");
+    if !probe.exists() {
+        return false;
+    }
+    let mut cmd = Command::new(&probe);
+    cmd.args([
+        "-v", "error",
+        "-select_streams", "a:0",
+        "-show_entries", "stream=codec_type",
+        "-of", "default=nw=1:nk=1",
+    ])
+    .arg(input)
+    .stdin(Stdio::null())
+    .stderr(Stdio::null());
+    hide_console(&mut cmd);
+    let Ok(out) = cmd.output() else { return false };
+    String::from_utf8_lossy(&out.stdout).trim() == "audio"
+}
+
+/// Merge N inputs into one MP4 using ffmpeg's **concat filter**
+/// (`-filter_complex concat=n=N:v=1:a=?`) rather than the concat
+/// demuxer. The filter re-encodes every input through a shared
+/// normalization chain (scale→pad→setsar→fps→format=yuv420p) so
+/// mismatched resolutions / framerates / pixel formats / codecs stop
+/// being a silent failure. The demuxer required all inputs to share
+/// those properties; when they didn't, ffmpeg would keep only the
+/// first file's stream and produce a truncated output — which was the
+/// 0.3.33 merge bug report ("output was only the first video; merging
+/// to similar file formats worked fine").
+///
+/// Target width / height / fps are taken from `target_w`/`h`/`fps`
+/// (caller typically probes the first input). All inputs are scaled to
+/// fit and padded to match, preserving aspect ratio. Audio is concat'd
+/// only if **every** input has an audio stream — otherwise the output
+/// is silent. Mixed audio/no-audio selections aren't worth the
+/// complexity of synthesizing silence to match.
+#[allow(clippy::too_many_arguments)]
+pub fn encode_merge_filter(
+    ffmpeg: &Path,
+    files: &[PathBuf],
+    output: &Path,
+    target_w: u32,
+    target_h: u32,
+    target_fps: u32,
+    crf: u32,
+    preset_speed: &str,
+    audio_bitrate: &str,
+    verbosity: &str,
+    duration_s: Option<f64>,
+    mut on_progress: impl FnMut(ProgressEvent),
+) -> Result<()> {
+    if files.len() < 2 {
+        bail!("merge requires at least two inputs");
+    }
+    let n = files.len();
+    let all_have_audio = files.iter().all(|p| has_audio_stream(ffmpeg, p));
+
+    // Build the filter_complex graph. Each input gets normalized to
+    // [v{i}] (and [a{i}] when audio is included); the final concat
+    // node stitches them into [v]/[a].
+    let mut graph = String::new();
+    for i in 0..n {
+        if i > 0 {
+            graph.push(';');
+        }
+        graph.push_str(&format!(
+            "[{i}:v]scale={w}:{h}:force_original_aspect_ratio=decrease,\
+             pad={w}:{h}:(ow-iw)/2:(oh-ih)/2,\
+             setsar=1,fps={fps},format=yuv420p[v{i}]",
+            i = i, w = target_w, h = target_h, fps = target_fps,
+        ));
+        if all_have_audio {
+            // aresample with async=1 nudges each input's audio to line
+            // up with the concat filter's PTS expectations — otherwise
+            // tiny drift at boundaries causes concat to log
+            // "Timestamps are unset" and occasionally drop samples.
+            graph.push_str(&format!(
+                ";[{i}:a]aresample=async=1:first_pts=0[a{i}]",
+                i = i
+            ));
+        }
+    }
+    graph.push(';');
+    for i in 0..n {
+        graph.push_str(&format!("[v{i}]"));
+        if all_have_audio {
+            graph.push_str(&format!("[a{i}]"));
+        }
+    }
+    let audio_flag = if all_have_audio { 1 } else { 0 };
+    graph.push_str(&format!(
+        "concat=n={n}:v=1:a={audio_flag}[v]"
+    ));
+    if all_have_audio {
+        graph.push_str("[a]");
+    }
+
+    on_progress(ProgressEvent {
+        file_index: 1,
+        total_files: 1,
+        input: format!("merge: {} files", n),
+        stage: "encode".into(),
+        percent: None,
+        message: Some(format!(
+            "Encoding MP4 — {target_w}x{target_h}@{target_fps}, {n} inputs{}",
+            if all_have_audio { " (with audio)" } else { " (silent)" }
+        )),
+    });
+
+    let mut cmd = Command::new(ffmpeg);
+    cmd.args(["-v", verbosity, "-y", "-hide_banner"]);
+    for p in files {
+        cmd.arg("-i").arg(p);
+    }
+    cmd.args(["-filter_complex", &graph]);
+    cmd.args(["-map", "[v]"]);
+    if all_have_audio {
+        cmd.args(["-map", "[a]"]);
+    }
+    cmd.args([
+        "-c:v", "libx264",
+        "-preset", preset_speed,
+        "-crf", &crf.to_string(),
+        "-pix_fmt", "yuv420p",
+        "-movflags", "+faststart",
+    ]);
+    if all_have_audio {
+        cmd.args(["-c:a", "aac", "-b:a", audio_bitrate]);
+    }
+    cmd.args(["-progress", "pipe:1"]).arg(output);
+
+    let input_display = format!("merge: {} files", n);
+    run_with_progress(cmd, duration_s, 1, 1, &input_display, "encode", &mut on_progress)?;
+
+    on_progress(ProgressEvent {
+        file_index: 1,
+        total_files: 1,
+        input: input_display,
+        stage: "done".into(),
+        percent: Some(1.0),
+        message: Some(output.display().to_string()),
+    });
+    Ok(())
+}
+
+/// Build an ad-hoc [`Preset`] for the Merge tool by probing the first
+/// file. Format comes from the first file's extension; dimensions and
+/// fps from ffprobe; quality knobs from built-in defaults that match
+/// each format's "looks right" baseline (CRF 23 / medium for MP4,
+/// 128-color bayer for GIF).
+///
+/// The returned preset's `suffix` is `_merged` so the output lands as
+/// `<first-stem>_merged.<ext>` next to the first file.
+pub fn derive_merge_preset(ffmpeg: &Path, first: &Path) -> Preset {
+    use crate::presets::{Dither, Format};
+
+    let ext = first
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("mp4")
+        .to_ascii_lowercase();
+    let format = if ext == "gif" { Format::Gif } else { Format::Mp4 };
+
+    let probe = probe_video(ffmpeg, first);
+
+    Preset {
+        id: "__merge__".into(),
+        name: "Merge".into(),
+        enabled: true,
+        format,
+        // Suffix is empty because encode_merge constructs the output
+        // name itself (`<first-stem>_merged`). Leaving it blank keeps
+        // output_path from double-appending.
+        suffix: String::new(),
+        width: probe.width,
+        height: probe.height,
+        fps: probe.fps,
+        crop: None,
+        // GIF defaults — ignored when format=Mp4.
+        palette_colors: Some(128),
+        dither: Some(Dither::Bayer),
+        bayer_scale: Some(3),
+        // MP4 defaults — ignored when format=Gif.
+        crf: Some(23),
+        preset_speed: Some("medium".into()),
+        video_bitrate: None,
+        audio_bitrate: Some("128k".into()),
+        use_cuda: Some(false),
+        target_max_mb: None,
+        grayscale: None,
+        timecode: None,
+        guides: None,
+        overlay: None,
+        icon: None,
+        order: 0,
+    }
+}
+
+/// Build an ad-hoc [`Preset`] for the Greyscale tool by probing the
+/// input. Format comes from the file's extension; dimensions and fps
+/// from ffprobe; quality knobs from the same "looks right" baseline the
+/// Merge tool uses (CRF 23 / medium for MP4, 128-color bayer for GIF).
+///
+/// Suffix is `_gray` so the output lands next to the source without
+/// overwriting it: `<stem>_gray.<ext>`.
+pub fn derive_grayscale_preset(ffmpeg: &Path, input: &Path) -> Preset {
+    use crate::presets::{Dither, Format};
+
+    let ext = input
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("mp4")
+        .to_ascii_lowercase();
+    let format = if ext == "gif" { Format::Gif } else { Format::Mp4 };
+
+    let probe = probe_video(ffmpeg, input);
+
+    Preset {
+        id: "__grayscale__".into(),
+        name: "Greyscale".into(),
+        enabled: true,
+        format,
+        suffix: "_gray".into(),
+        width: probe.width,
+        height: probe.height,
+        fps: probe.fps,
+        crop: None,
+        palette_colors: Some(128),
+        dither: Some(Dither::Bayer),
+        bayer_scale: Some(3),
+        crf: Some(23),
+        preset_speed: Some("medium".into()),
+        video_bitrate: None,
+        audio_bitrate: Some("128k".into()),
+        use_cuda: Some(false),
+        target_max_mb: None,
+        grayscale: Some(true),
+        timecode: None,
+        guides: None,
+        overlay: None,
+        icon: None,
+        order: 0,
+    }
+}
+
+/// Build an ad-hoc [`Preset`] for the Overlay tool. Dims are left None
+/// so no scale filter runs — the overlay filters are
+/// layered onto the source at its native size. Suffix `_overlay`.
+pub fn derive_overlay_preset(ffmpeg: &Path, input: &Path, cfg: OverlayConfig) -> Preset {
+    use crate::presets::{Dither, Format};
+
+    let ext = input
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("mp4")
+        .to_ascii_lowercase();
+    let format = if ext == "gif" { Format::Gif } else { Format::Mp4 };
+
+    let probe = probe_video(ffmpeg, input);
+
+    Preset {
+        id: "__overlay__".into(),
+        name: "Overlay".into(),
+        enabled: true,
+        format,
+        suffix: "_overlay".into(),
+        width: None,
+        height: None,
+        fps: probe.fps,
+        crop: None,
+        palette_colors: Some(128),
+        dither: Some(Dither::Bayer),
+        bayer_scale: Some(3),
+        crf: Some(20),
+        preset_speed: Some("medium".into()),
+        video_bitrate: None,
+        audio_bitrate: Some("128k".into()),
+        use_cuda: Some(false),
+        target_max_mb: None,
+        grayscale: None,
+        timecode: None,
+        guides: None,
+        overlay: Some(cfg),
+        icon: None,
+        order: 0,
+    }
+}
+
+/// Side-by-side Compare: stack N inputs horizontally into one output.
+/// Each input is scaled to the first file's height and normalized to
+/// its fps so hstack sees uniform streams. Output format matches the
+/// first file's extension (mp4 or gif). Audio is dropped — A/B review
+/// is a visual-only workflow.
+pub fn encode_compare_files(
+    ffmpeg: &Path,
+    files: &[PathBuf],
+    settings: &Settings,
+    mut on_progress: impl FnMut(ProgressEvent),
+) -> Result<PathBuf> {
+    if files.len() < 2 {
+        bail!("Compare needs at least two files");
+    }
+    let first = &files[0];
+    let ext = first
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("mp4")
+        .to_ascii_lowercase();
+    let is_gif = ext == "gif";
+
+    let probe = probe_video(ffmpeg, first);
+    let height = probe.height.unwrap_or(720).max(120);
+    let fps = probe.fps.unwrap_or(30);
+    let n = files.len();
+
+    // Normalize each stream then hstack. scale=-2:H keeps aspect; fps
+    // resamples to a shared rate; setsar=1 avoids "SAR mismatch" errors
+    // when inputs have different pixel aspect ratios.
+    let mut norm = String::new();
+    for i in 0..n {
+        if i > 0 {
+            norm.push(';');
+        }
+        norm.push_str(&format!(
+            "[{i}:v]scale=-2:{height}:flags=lanczos,fps={fps},setsar=1[v{i}]"
+        ));
+    }
+    let mut stacked = String::new();
+    for i in 0..n {
+        stacked.push_str(&format!("[v{i}]"));
+    }
+    stacked.push_str(&format!("hstack=inputs={n}"));
+
+    let stem = first
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("output");
+    let base = first
+        .parent()
+        .unwrap_or(Path::new("."))
+        .to_path_buf()
+        .join(format!("{stem}_compare.{ext}"));
+    let out = unique_output_path(&base);
+
+    // Duration for the progress bar = shortest input (hstack caps there).
+    let duration = files
+        .iter()
+        .filter_map(|p| probe_duration(ffmpeg, p))
+        .fold(f64::INFINITY, f64::min);
+    let duration_opt = if duration.is_finite() { Some(duration) } else { None };
+
+    let verbosity = settings.verbosity.clone().unwrap_or_else(|| "warning".into());
+    let input_display = format!("compare: {stem}");
+    let total_files = 1usize;
+    let file_index = 1usize;
+
+    if is_gif {
+        on_progress(ProgressEvent {
+            file_index,
+            total_files,
+            input: input_display.clone(),
+            stage: "palette".into(),
+            percent: None,
+            message: Some("Generating palette".into()),
+        });
+
+        // Pass 1: palette from the hstacked stream.
+        let palette_tmp = {
+            let nonce = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0);
+            paths::tmp_dir()
+                .unwrap_or_else(|_| std::env::temp_dir())
+                .join(format!("{stem}.{}.{nonce}.compare.palette.png", std::process::id()))
+        };
+        struct PaletteGuard(PathBuf);
+        impl Drop for PaletteGuard {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_file(&self.0);
+            }
+        }
+        let _palette_guard = PaletteGuard(palette_tmp.clone());
+
+        let filter_p1 = format!("{norm};{stacked},palettegen=max_colors=128:stats_mode=full");
+        let mut pal_cmd = Command::new(ffmpeg);
+        pal_cmd.args(["-v", &verbosity, "-y"]);
+        for f in files {
+            pal_cmd.arg("-i").arg(f);
+        }
+        pal_cmd
+            .args(["-filter_complex", &filter_p1])
+            .arg(&palette_tmp)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        hide_console(&mut pal_cmd);
+        let status = pal_cmd
+            .status()
+            .context("spawning ffmpeg for compare palette")?;
+        if !status.success() {
+            bail!("compare palette pass failed");
+        }
+
+        // Pass 2: hstack + paletteuse. The palette is the last -i input.
+        let palette_idx = n;
+        let filter_p2 = format!(
+            "{norm};{stacked}[vh];[vh][{palette_idx}:v]paletteuse=dither=bayer:bayer_scale=3",
+            norm = norm,
+            stacked = stacked,
+            palette_idx = palette_idx,
+        );
+
+        on_progress(ProgressEvent {
+            file_index,
+            total_files,
+            input: input_display.clone(),
+            stage: "encode".into(),
+            percent: None,
+            message: Some("Encoding GIF".into()),
+        });
+
+        let mut cmd = Command::new(ffmpeg);
+        cmd.args(["-v", &verbosity, "-y", "-hide_banner"]);
+        for f in files {
+            cmd.arg("-i").arg(f);
+        }
+        cmd.arg("-i").arg(&palette_tmp);
+        cmd.args(["-filter_complex", &filter_p2])
+            .args(["-progress", "pipe:1"])
+            .args(["-shortest"])
+            .arg(&out);
+        run_with_progress(
+            cmd,
+            duration_opt,
+            file_index,
+            total_files,
+            &input_display,
+            "encode",
+            &mut on_progress,
+        )?;
+    } else {
+        on_progress(ProgressEvent {
+            file_index,
+            total_files,
+            input: input_display.clone(),
+            stage: "encode".into(),
+            percent: None,
+            message: Some("Encoding MP4 compare".into()),
+        });
+
+        let filter = format!("{norm};{stacked}[vh]");
+        let mut cmd = Command::new(ffmpeg);
+        cmd.args(["-v", &verbosity, "-y", "-hide_banner"]);
+        for f in files {
+            cmd.arg("-i").arg(f);
+        }
+        cmd.args(["-filter_complex", &filter])
+            .args(["-map", "[vh]"])
+            .args(["-c:v", "libx264", "-preset", "medium", "-crf", "20"])
+            .args(["-pix_fmt", "yuv420p", "-movflags", "+faststart"])
+            .args(["-an"])
+            .args(["-shortest"])
+            .args(["-progress", "pipe:1"])
+            .arg(&out);
+        run_with_progress(
+            cmd,
+            duration_opt,
+            file_index,
+            total_files,
+            &input_display,
+            "encode",
+            &mut on_progress,
+        )?;
+    }
+
+    on_progress(ProgressEvent {
+        file_index,
+        total_files,
+        input: input_display,
+        stage: "done".into(),
+        percent: Some(1.0),
+        message: Some(out.display().to_string()),
+    });
+    Ok(out)
+}
+

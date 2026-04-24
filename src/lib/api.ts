@@ -38,9 +38,37 @@ export const openDataFolder = () => invoke<void>("open_data_folder");
 export const encode = (files: string[], preset: Preset) =>
   invoke<void>("encode", { files, preset });
 
+/** Merge-mode encode: concatenate `files` (already in desired order)
+ *  into a single output. Format + encode settings are derived from the
+ *  first file by the Rust side — no preset arg. Progress events flow
+ *  through the same `encode-progress` channel; file_index and
+ *  total_files are both 1 since a merge is one logical encode. */
+export const encodeMerge = (files: string[]) =>
+  invoke<void>("encode_merge", { files });
+
+/** Greyscale-mode encode: desaturates each file to its own
+ *  format-matched greyscale copy. No preset arg — settings are derived
+ *  per-file by the Rust side. */
+export const encodeGrayscale = (files: string[]) =>
+  invoke<void>("encode_grayscale", { files });
+
+/** A/B Compare: stack N inputs horizontally into one output video for
+ *  visual comparison. Output is named `<first-stem>_compare.<ext>`. */
+export const encodeCompare = (files: string[]) =>
+  invoke<void>("encode_compare", { files });
+
+/** Overlay encode: per-file burn-in of corner text + optional border
+ *  + optional aspect guides. All config comes from settings.tools.overlay. */
+export const encodeOverlay = (files: string[]) =>
+  invoke<void>("encode_overlay", { files });
+
 export const getPendingFiles = () => invoke<string[]>("get_pending_files");
 export const getPendingPresetId = () => invoke<string | null>("get_pending_preset_id");
 export const getPendingCustomPreset = () => invoke<Preset | null>("get_pending_custom_preset");
+export const getPendingMerge = () => invoke<boolean>("get_pending_merge");
+export const getPendingGrayscale = () => invoke<boolean>("get_pending_grayscale");
+export const getPendingCompare = () => invoke<boolean>("get_pending_compare");
+export const getPendingOverlay = () => invoke<boolean>("get_pending_overlay");
 
 /** Stash files + custom preset in app state ahead of navigating the current
  * webview to the progress route. Unlike the old `start_custom_encode`, this

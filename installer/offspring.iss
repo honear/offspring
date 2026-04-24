@@ -10,7 +10,7 @@
 ; Compile with the Inno Setup compiler (iscc.exe or the Inno Setup IDE).
 
 #define AppName      "Offspring"
-#define AppVersion   "0.3.16"
+#define AppVersion   "0.3.34"
 #define AppPublisher "Second March"
 #define AppExeName   "offspring.exe"
 #define AppId        "{{D8E5C6BC-5F10-4B29-A8A9-7D4D1A3B9C22}"
@@ -99,6 +99,16 @@ Filename: "{app}\{#AppExeName}"; \
 Filename: "{app}\{#AppExeName}"; \
     Description: "Launch {#AppName}"; \
     Flags: postinstall skipifsilent nowait
+; In-app updater relaunch: when the app spawns this installer with
+; /LAUNCHAFTER (silent-update flow), launch the freshly-installed binary
+; once [Run] reaches this entry. runasoriginaluser drops admin so the app
+; runs in the invoking user's context — not the elevated installer's —
+; which matters for per-user AppData/registry writes. Gated on the flag
+; so normal silent installs (e.g. deployment scripts) aren't surprised by
+; a window popping up.
+Filename: "{app}\{#AppExeName}"; \
+    Flags: nowait runasoriginaluser; \
+    Check: ShouldLaunchAfter
 
 [UninstallRun]
 ; Remove SendTo shortcuts before files are deleted
@@ -117,3 +127,24 @@ Filename: "powershell.exe"; \
 [UninstallDelete]
 ; Leave %APPDATA%\Offspring and %LOCALAPPDATA%\Offspring alone by default.
 ; Users can delete manually if they want to wipe presets / FFmpeg.
+
+[Code]
+// ShouldLaunchAfter returns True iff the installer was invoked with the
+// custom /LAUNCHAFTER switch. The in-app updater passes this when it wants
+// the freshly-installed binary to relaunch itself on completion. A plain
+// command-line scan is robust enough — the switch is ours, not Inno's, so
+// Inno won't strip it from GetCmdTail.
+function ShouldLaunchAfter: Boolean;
+var
+  I: Integer;
+begin
+  Result := False;
+  for I := 1 to ParamCount do
+  begin
+    if CompareText(ParamStr(I), '/LAUNCHAFTER') = 0 then
+    begin
+      Result := True;
+      Exit;
+    end;
+  end;
+end;

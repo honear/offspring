@@ -5,7 +5,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use crate::paths;
-use crate::presets::Preset;
+use crate::presets::{Preset, Settings};
 
 /// Legacy filename prefix. Any .lnk in the user's SendTo folder whose stem
 /// starts with "Offspring - " is treated as ours and cleaned up on sync.
@@ -82,6 +82,58 @@ pub fn write_custom_shortcut() -> Result<PathBuf> {
     Ok(path)
 }
 
+/// Single "Offspring Merge" shortcut. Distinct from the per-preset
+/// shortcuts because Merge doesn't take a preset — the Rust side
+/// derives format + settings from the first selected file. Windows
+/// forwards the full multi-selection to `offspring.exe merge` as argv,
+/// so one shortcut handles any N≥2 selection.
+pub fn write_merge_shortcut() -> Result<PathBuf> {
+    let path = shortcut_path("Offspring Merge")?;
+    let exe = current_exe()?;
+    let mut link = ShellLink::new(exe.to_string_lossy().as_ref())
+        .context("creating shell link")?;
+    link.set_arguments(Some("merge".to_string()));
+    link.set_working_dir(Some(String::new()));
+    link.create_lnk(&path).context("writing .lnk")?;
+    Ok(path)
+}
+
+/// Single "Offspring Greyscale" shortcut. Same pattern as Merge — one
+/// entry handles any-sized multi-selection (each file is encoded to a
+/// greyscale copy alongside it).
+pub fn write_grayscale_shortcut() -> Result<PathBuf> {
+    let path = shortcut_path("Offspring Greyscale")?;
+    let exe = current_exe()?;
+    let mut link = ShellLink::new(exe.to_string_lossy().as_ref())
+        .context("creating shell link")?;
+    link.set_arguments(Some("grayscale".to_string()));
+    link.set_working_dir(Some(String::new()));
+    link.create_lnk(&path).context("writing .lnk")?;
+    Ok(path)
+}
+
+pub fn write_compare_shortcut() -> Result<PathBuf> {
+    let path = shortcut_path("Offspring Compare")?;
+    let exe = current_exe()?;
+    let mut link = ShellLink::new(exe.to_string_lossy().as_ref())
+        .context("creating shell link")?;
+    link.set_arguments(Some("compare".to_string()));
+    link.set_working_dir(Some(String::new()));
+    link.create_lnk(&path).context("writing .lnk")?;
+    Ok(path)
+}
+
+pub fn write_overlay_shortcut() -> Result<PathBuf> {
+    let path = shortcut_path("Offspring Overlay")?;
+    let exe = current_exe()?;
+    let mut link = ShellLink::new(exe.to_string_lossy().as_ref())
+        .context("creating shell link")?;
+    link.set_arguments(Some("overlay".to_string()));
+    link.set_working_dir(Some(String::new()));
+    link.create_lnk(&path).context("writing .lnk")?;
+    Ok(path)
+}
+
 /// Remove any leftover pre-manifest shortcuts from the user's SendTo folder.
 /// These are the old "Offspring - *.lnk" naming we used before switching to
 /// unadorned preset names. Safe to run on every sync.
@@ -119,7 +171,7 @@ fn remove_manifest_shortcuts(manifest: &Manifest) -> Result<()> {
     Ok(())
 }
 
-pub fn sync(presets: &[Preset]) -> Result<()> {
+pub fn sync(presets: &[Preset], settings: &Settings) -> Result<()> {
     // Remove legacy prefix-style shortcuts from any previous version, then
     // remove everything our current manifest claims. This catches renames:
     // the preset "Fast GIF" → "Fast.gif" means the old "Fast GIF.lnk" is in
@@ -148,6 +200,25 @@ pub fn sync(presets: &[Preset]) -> Result<()> {
     }
     let cp = write_custom_shortcut()?;
     push_if_new(&cp, &mut written, &mut seen);
+
+    // Single "Offspring Merge" shortcut, gated on the Merge tool toggle.
+    // One entry serves any multi-selection — no per-preset duplication.
+    if settings.tools.merge.enabled {
+        let mp = write_merge_shortcut()?;
+        push_if_new(&mp, &mut written, &mut seen);
+    }
+    if settings.tools.grayscale.enabled {
+        let gp = write_grayscale_shortcut()?;
+        push_if_new(&gp, &mut written, &mut seen);
+    }
+    if settings.tools.compare.enabled {
+        let cp = write_compare_shortcut()?;
+        push_if_new(&cp, &mut written, &mut seen);
+    }
+    if settings.tools.overlay.enabled {
+        let op = write_overlay_shortcut()?;
+        push_if_new(&op, &mut written, &mut seen);
+    }
 
     Manifest { shortcuts: written }.save()?;
     Ok(())

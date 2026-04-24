@@ -75,6 +75,34 @@ pub struct Preset {
     #[serde(default)]
     pub target_max_mb: Option<u32>,
 
+    /// Desaturate to greyscale. Independent of format — works on both
+    /// GIF and MP4 outputs. When true, adds `format=gray` to the filter
+    /// chain (MP4 keeps `yuv420p` as pix_fmt, GIF palette is generated
+    /// from the already-greyscale frames). Also reachable as a Tool
+    /// (right-click → Greyscale) via `derive_grayscale_preset`.
+    #[serde(default)]
+    pub grayscale: Option<bool>,
+
+    /// Burn in the current frame number in the top-left corner.
+    /// Uses Windows' bundled Consolas font. Independent of format —
+    /// runs on both GIF (pre-palettegen) and MP4 outputs. Will also
+    /// be reachable via the planned Overlay tool's timecode option.
+    #[serde(default)]
+    pub timecode: Option<bool>,
+
+    /// Aspect-ratio overlay boxes. Populated only by the Guides tool
+    /// via `derive_guides_preset` — no user preset ever writes this,
+    /// so it's `skip`-d on serialize to keep presets.json clean.
+    #[serde(skip)]
+    pub guides: Option<GuidesConfig>,
+
+    /// Rich-overlay config (per-corner text, border, opacity, color,
+    /// guides). Populated only by the Overlay tool via
+    /// `derive_overlay_preset`. Skip on serialize — this is tool-only
+    /// state that never belongs in presets.json.
+    #[serde(skip)]
+    pub overlay: Option<OverlayConfig>,
+
     // icon (absolute path or empty to use default)
     #[serde(default)]
     pub icon: Option<String>,
@@ -82,6 +110,75 @@ pub struct Preset {
     // order in SendTo / UI
     #[serde(default)]
     pub order: u32,
+}
+
+/// In-memory config for the guides block inside Overlay — which
+/// aspect-ratio boxes to draw and what opacity to use. Never serialized
+/// into Preset (see `#[serde(skip)]` on `Preset.guides`); the on-disk
+/// shape lives on the Overlay tool settings instead, which also fills
+/// this struct at encode time.
+#[derive(Clone, Debug)]
+pub struct GuidesConfig {
+    pub show_16_9: bool,
+    pub show_9_16: bool,
+    pub show_4_5: bool,
+    /// ffmpeg-parseable color strings (e.g. "red", "0xff0000").
+    /// `@alpha` is appended by the filter code from [`Self::opacity`].
+    pub color_16_9: String,
+    pub color_9_16: String,
+    pub color_4_5: String,
+    /// 0.0–1.0 alpha for both the drawbox outline and the ratio label.
+    /// User-facing slider is 0–100; commands.rs divides by 100 before
+    /// populating this.
+    pub opacity: f32,
+}
+
+/// Per-corner overlay content. `None` means the corner stays blank.
+/// `Custom` and `Custom2` are independent free-text slots so a user can
+/// place, e.g., a shot code in one corner and a version tag in another.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum OverlaySlotKind {
+    None,
+    Filename,
+    Timecode,
+    Custom,
+    Custom2,
+}
+
+/// Runtime config for the Overlay tool. Built from `OverlayTool` settings
+/// plus the current input file (filename resolves per-file). Never
+/// serialized; reachable only through `derive_overlay_preset`.
+#[derive(Clone, Debug)]
+pub struct OverlayConfig {
+    pub top_left: OverlaySlotKind,
+    pub top_right: OverlaySlotKind,
+    pub bottom_left: OverlaySlotKind,
+    pub bottom_right: OverlaySlotKind,
+    /// User-entered string used when any slot resolves to `Custom`.
+    pub custom_text: String,
+    /// Second independent custom-text slot for `Custom2`.
+    pub custom_text_2: String,
+    /// Filename (no extension) of the current input. Filled by the
+    /// encode-time helper before the filter chain is built.
+    pub filename: String,
+    /// 0.0–1.0. Applied to drawtext `fontcolor@opacity`.
+    pub opacity: f32,
+    /// ffmpeg-compatible color string (e.g. `white`, `0xffffff`).
+    pub color: String,
+    /// When true, pad the frame with black bars top + bottom and draw
+    /// corner text inside those bars instead of on top of the image.
+    pub border: bool,
+    /// When true, emit the corner drawtext + optional border. Gates the
+    /// "metadata" half of the Overlay pane in the UI. When false, the
+    /// overlay encode only draws the aspect-ratio guide boxes (if those
+    /// are enabled inside [`Self::guides`]).
+    pub metadata: bool,
+    /// Font scale multiplier for corner text. 1.0 = the legacy default
+    /// (fontsize=h/25). Margins and box border scale in lockstep so the
+    /// overall layout stays visually balanced at any size.
+    pub font_scale: f32,
+    /// When true, include the Guides aspect-ratio boxes in the output.
+    pub guides: GuidesConfig,
 }
 
 #[derive(Serialize, Deserialize, Default, Clone, Debug)]
@@ -106,6 +203,272 @@ pub struct Settings {
     /// default because enabling it prompts the user for cert trust.
     #[serde(default)]
     pub modern_menu_enabled: Option<bool>,
+    /// Extension tools (auto-detect sequences, merge multi-select, …).
+    /// See `ToolsSettings` for the per-tool knobs. Absent / partial JSON
+    /// falls back to `ToolsSettings::default()` so old settings files
+    /// keep parsing.
+    #[serde(default)]
+    pub tools: ToolsSettings,
+}
+
+/// Aggregate of every per-tool config block. Keeping tools in their own
+/// sub-object (rather than flat fields on `Settings`) means we can add or
+/// remove tools without churning top-level field names, and the UI can
+/// mirror the shape one-to-one.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct ToolsSettings {
+    #[serde(default = "SequenceTool::default")]
+    pub sequence: SequenceTool,
+    #[serde(default = "MergeTool::default")]
+    pub merge: MergeTool,
+    #[serde(default = "GrayscaleTool::default")]
+    pub grayscale: GrayscaleTool,
+    #[serde(default = "CompareTool::default")]
+    pub compare: CompareTool,
+    #[serde(default = "OverlayTool::default")]
+    pub overlay: OverlayTool,
+}
+
+impl Default for ToolsSettings {
+    fn default() -> Self {
+        Self {
+            sequence: SequenceTool::default(),
+            merge: MergeTool::default(),
+            grayscale: GrayscaleTool::default(),
+            compare: CompareTool::default(),
+            overlay: OverlayTool::default(),
+        }
+    }
+}
+
+/// Auto-detect image sequences on single-file right-click and encode the
+/// whole sequence with the preset's FPS instead of a one-frame clip.
+/// Enabled by default — the detection is conservative (images only, stem
+/// must end in N+ zero-padded digits, and at least one sibling must match).
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct SequenceTool {
+    pub enabled: bool,
+    /// Minimum trailing zero-padded digit count that counts as a sequence.
+    /// Four is the VFX/render-farm convention (`render_0001.png`) and
+    /// filters out accidental matches like version tags (`r01`, `v02`).
+    pub min_digits: u32,
+    /// Fallback framerate used when the preset doesn't specify one.
+    /// Float because VFX/broadcast rates (23.976, 29.97) are common; the
+    /// image2 demuxer accepts them directly via `-framerate`. Presets
+    /// that DO set `fps` win over this — it only kicks in for MP4
+    /// presets that leave fps unset.
+    #[serde(default = "default_sequence_fps")]
+    pub default_fps: f32,
+}
+
+fn default_sequence_fps() -> f32 {
+    24.0
+}
+
+impl Default for SequenceTool {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            min_digits: 4,
+            default_fps: default_sequence_fps(),
+        }
+    }
+}
+
+/// Merge multiple selected videos into a single output via ffmpeg's
+/// concat demuxer. Exposed as a single "Merge" entry inside the Offspring
+/// modern-menu flyout (hidden on single-file selection). Output format +
+/// settings are inherited from the first selected file — no preset
+/// picker. On by default because a single toggle-able verb has a much
+/// lower "where'd that come from?" cost than the per-preset sub-flyout
+/// it replaces.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct MergeTool {
+    pub enabled: bool,
+}
+
+impl Default for MergeTool {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
+}
+
+/// One-shot greyscale conversion that inherits format + dimensions + fps
+/// from the input. Appears as a single leaf entry in the modern menu and
+/// as "Offspring Greyscale.lnk" in SendTo when the toggle is on. Users
+/// who want a specific quality knob combined with greyscale should
+/// instead set the per-preset `grayscale` field on a saved preset.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct GrayscaleTool {
+    pub enabled: bool,
+}
+
+impl Default for GrayscaleTool {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
+}
+
+fn default_guides_16_9() -> bool { true }
+fn default_guides_9_16() -> bool { true }
+fn default_guides_4_5() -> bool { false }
+
+fn default_color_16_9() -> String { "0xe5484d".into() }
+fn default_color_9_16() -> String { "0x00c2d7".into() }
+fn default_color_4_5() -> String { "0xf5d90a".into() }
+
+/// Side-by-side A/B compare: stack N selected files horizontally into
+/// one output. Heights are normalized to the first file so hstack
+/// accepts them; framerate is normalized to the first file's too so
+/// the streams stay in sync. Output format matches the first file.
+/// Enabled by default — single-click review workflow, no config.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct CompareTool {
+    pub enabled: bool,
+}
+
+impl Default for CompareTool {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
+}
+
+/// Overlay tool: burns per-corner text (filename, timecode, or user
+/// string), optional aspect-ratio guide boxes, and an optional solid
+/// border onto each input. All four corners share the same color,
+/// opacity, and custom-text fields so the UI stays compact.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct OverlayTool {
+    pub enabled: bool,
+    #[serde(default = "OverlaySlot::none")]
+    pub top_left: OverlaySlot,
+    #[serde(default = "OverlaySlot::none")]
+    pub top_right: OverlaySlot,
+    #[serde(default = "OverlaySlot::none")]
+    pub bottom_left: OverlaySlot,
+    #[serde(default = "OverlaySlot::none")]
+    pub bottom_right: OverlaySlot,
+    /// Shared text used by any corner whose slot is `Custom`.
+    #[serde(default)]
+    pub custom_text: String,
+    /// Second independent text slot, wired to the `Custom 2…` dropdown
+    /// option so one overlay can carry two arbitrary labels at once.
+    #[serde(default)]
+    pub custom_text_2: String,
+    /// 0–100, UI scale. Converted to 0.0–1.0 before being baked into
+    /// the `fontcolor@opacity` string.
+    #[serde(default = "default_overlay_opacity")]
+    pub opacity: u32,
+    /// Overlay text color. Stored in ffmpeg-parseable form — the UI
+    /// sends hex with the `#` stripped and an `0x` prefix applied.
+    #[serde(default = "default_overlay_color")]
+    pub color: String,
+    /// Pad the clip on all four sides so corner text sits outside the
+    /// image. The left/right strips are left blank by design — the user
+    /// asked for equal borders for a clean frame.
+    #[serde(default)]
+    pub border: bool,
+    /// Gate for the "metadata" half of the Overlay pane (corner text,
+    /// text color/opacity, border). When off, the overlay encode only
+    /// draws the aspect-ratio guides (if those are enabled). Defaults to
+    /// true so existing installs keep showing corner text after upgrade.
+    #[serde(default = "default_overlay_metadata")]
+    pub metadata: bool,
+    /// When true, also draw the Guides aspect-ratio boxes (see below).
+    #[serde(default)]
+    pub guides: bool,
+    #[serde(default = "default_guides_16_9")]
+    pub show_16_9: bool,
+    #[serde(default = "default_guides_9_16")]
+    pub show_9_16: bool,
+    #[serde(default = "default_guides_4_5")]
+    pub show_4_5: bool,
+    #[serde(default = "default_color_16_9")]
+    pub color_16_9: String,
+    #[serde(default = "default_color_9_16")]
+    pub color_9_16: String,
+    #[serde(default = "default_color_4_5")]
+    pub color_4_5: String,
+    /// 0–100, UI scale. Applied only to the guide boxes (independent of
+    /// the metadata opacity field, which controls corner text). Defaults
+    /// to 90 — matches the old hard-coded `@0.9` behavior.
+    #[serde(default = "default_overlay_opacity")]
+    pub guides_opacity: u32,
+    /// Font size as a percentage (50–200). 100 = legacy default.
+    /// Margins + box border scale with it so proportions stay balanced.
+    #[serde(default = "default_overlay_font_scale")]
+    pub metadata_font_scale: u32,
+}
+
+/// Settings-level shape of a single overlay slot. Parallel to
+/// `OverlaySlotKind` but serde-friendly; the runtime `OverlayConfig`
+/// dereferences this into a `OverlaySlotKind` before filter-building.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "lowercase")]
+pub enum OverlaySlot {
+    None,
+    Filename,
+    Timecode,
+    Custom,
+    Custom2,
+}
+
+impl OverlaySlot {
+    fn none() -> Self {
+        OverlaySlot::None
+    }
+    pub fn to_kind(&self) -> OverlaySlotKind {
+        match self {
+            OverlaySlot::None => OverlaySlotKind::None,
+            OverlaySlot::Filename => OverlaySlotKind::Filename,
+            OverlaySlot::Timecode => OverlaySlotKind::Timecode,
+            OverlaySlot::Custom => OverlaySlotKind::Custom,
+            OverlaySlot::Custom2 => OverlaySlotKind::Custom2,
+        }
+    }
+}
+
+fn default_overlay_opacity() -> u32 {
+    90
+}
+
+fn default_overlay_color() -> String {
+    "white".into()
+}
+
+fn default_overlay_metadata() -> bool {
+    true
+}
+
+fn default_overlay_font_scale() -> u32 {
+    100
+}
+
+impl Default for OverlayTool {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            top_left: OverlaySlot::Filename,
+            top_right: OverlaySlot::None,
+            bottom_left: OverlaySlot::None,
+            bottom_right: OverlaySlot::Timecode,
+            custom_text: String::new(),
+            custom_text_2: String::new(),
+            opacity: default_overlay_opacity(),
+            color: default_overlay_color(),
+            border: false,
+            metadata: default_overlay_metadata(),
+            guides: false,
+            show_16_9: default_guides_16_9(),
+            show_9_16: default_guides_9_16(),
+            show_4_5: default_guides_4_5(),
+            color_16_9: default_color_16_9(),
+            color_9_16: default_color_9_16(),
+            color_4_5: default_color_4_5(),
+            guides_opacity: default_overlay_opacity(),
+            metadata_font_scale: default_overlay_font_scale(),
+        }
+    }
 }
 
 pub fn load_presets() -> Result<Vec<Preset>> {

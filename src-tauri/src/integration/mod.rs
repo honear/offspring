@@ -49,11 +49,11 @@ pub fn sync_all(presets: &[Preset], settings: &Settings) -> Result<()> {
         modern_menu::sync(presets)?;
     } else {
         modern_menu::cleanup()?;
-        context_menu::sync(presets)?;
+        context_menu::sync(presets, settings)?;
     }
 
     if settings.sendto_enabled.unwrap_or(false) {
-        sendto::sync(presets)?;
+        sendto::sync(presets, settings)?;
     } else {
         sendto::cleanup()?;
     }

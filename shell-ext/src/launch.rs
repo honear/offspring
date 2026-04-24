@@ -57,3 +57,53 @@ pub fn spawn_custom(files: &[PathBuf]) {
     }
     let _ = cmd.spawn();
 }
+
+pub fn spawn_merge(files: &[PathBuf]) {
+    let Some(exe) = read_exe_path() else { return };
+    let mut cmd = Command::new(&exe);
+    cmd.arg("merge");
+    for f in files {
+        cmd.arg(f);
+    }
+    let _ = cmd.spawn();
+}
+
+pub fn spawn_grayscale(files: &[PathBuf]) {
+    let Some(exe) = read_exe_path() else { return };
+    let mut cmd = Command::new(&exe);
+    cmd.arg("grayscale");
+    for f in files {
+        cmd.arg(f);
+    }
+    let _ = cmd.spawn();
+}
+
+pub fn spawn_compare(files: &[PathBuf]) {
+    let Some(exe) = read_exe_path() else { return };
+    let mut cmd = Command::new(&exe);
+    cmd.arg("compare");
+    for f in files {
+        cmd.arg(f);
+    }
+    let _ = cmd.spawn();
+}
+
+pub fn spawn_overlay(files: &[PathBuf]) {
+    let Some(exe) = read_exe_path() else { return };
+    let mut cmd = Command::new(&exe);
+    cmd.arg("overlay");
+    for f in files {
+        cmd.arg(f);
+    }
+    let _ = cmd.spawn();
+}
+
+/// Launch the main Offspring UI (the Settings window). No file args —
+/// the CLI `settings` verb ignores any selection and always shows the
+/// configuration surface.
+pub fn spawn_settings() {
+    let Some(exe) = read_exe_path() else { return };
+    let mut cmd = Command::new(&exe);
+    cmd.arg("settings");
+    let _ = cmd.spawn();
+}

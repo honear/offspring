@@ -164,13 +164,21 @@
       phase = "resolving preset";
       let files: string[] = [];
       let preset: Preset | undefined;
-      const [f, presetId, customPreset, allPresets] = await Promise.all([
+      const [f, presetId, customPreset, allPresets, mergeFlag, grayscaleFlag, compareFlag, overlayFlag] = await Promise.all([
         api.getPendingFiles(),
         api.getPendingPresetId(),
         api.getPendingCustomPreset(),
         api.listPresets(),
+        api.getPendingMerge(),
+        api.getPendingGrayscale(),
+        api.getPendingCompare(),
+        api.getPendingOverlay(),
       ]);
       files = f;
+      const isMerge = mergeFlag === true;
+      const isGrayscale = grayscaleFlag === true;
+      const isCompare = compareFlag === true;
+      const isOverlay = overlayFlag === true;
       if (presetId) {
         preset = allPresets.find((p) => p.id === presetId);
       } else if (customPreset) {
@@ -183,18 +191,61 @@
         closeSoon(0);
         return;
       }
-      if (!preset) {
+      // Tool paths derive their own settings from the inputs, so they
+      // don't need a resolved preset.
+      const isTool = isMerge || isGrayscale || isCompare || isOverlay;
+      if (!isTool && !preset) {
         errored = true;
         errorMsg = `No preset was resolved (presetId=${presetId ?? "null"}, customPreset=${customPreset ? "present" : "null"}). The shortcut may be stale.`;
         finish(0);
         return;
       }
+      if (isMerge && files.length < 2) {
+        errored = true;
+        errorMsg = "Merge needs at least two files. Select two or more and try again.";
+        finish(0);
+        return;
+      }
+      if (isCompare && files.length < 2) {
+        errored = true;
+        errorMsg = "Compare needs at least two files. Select two or more and try again.";
+        finish(0);
+        return;
+      }
 
-      phase = "starting encode";
+      phase = isMerge
+        ? "starting merge"
+        : isGrayscale
+          ? "starting greyscale"
+          : isCompare
+            ? "starting compare"
+            : isOverlay
+              ? "starting overlay"
+              : "starting encode";
       armStallTimer();
       didStart = true;
-      await api.encode(files, preset);
-      phase = "encoding";
+      if (isMerge) {
+        // Merge derives its own settings from the first file — no
+        // preset is sent through the wire.
+        await api.encodeMerge(files);
+      } else if (isGrayscale) {
+        await api.encodeGrayscale(files);
+      } else if (isCompare) {
+        await api.encodeCompare(files);
+      } else if (isOverlay) {
+        await api.encodeOverlay(files);
+      } else {
+        await api.encode(files, preset!);
+      }
+      phase = isMerge
+        ? "merging"
+        : isGrayscale
+          ? "greyscaling"
+          : isCompare
+            ? "stacking"
+            : isOverlay
+              ? "overlaying"
+              : "encoding";
     } catch (err) {
       // Anything that throws — listen(), invoke() failure, serde rejection,
       // FFmpeg-not-found — lands here and surfaces to the user.

@@ -52,7 +52,16 @@ try {
     Write-Host "[2/5] npm run tauri build..." -ForegroundColor Yellow
     npm run tauri build
     if ($LASTEXITCODE -ne 0) { throw "tauri build failed" }
-    $exe = Join-Path $repoRoot "src-tauri\target\release\offspring.exe"
+    # Cargo respects CARGO_TARGET_DIR for dev machines that share a target
+    # directory across projects — on those, the binary lives at
+    # $env:CARGO_TARGET_DIR\release, not src-tauri\target\release. Mirror
+    # the same logic installer/offspring.iss uses so the two stay in sync.
+    $targetRelease = if ($env:CARGO_TARGET_DIR) {
+        Join-Path $env:CARGO_TARGET_DIR "release"
+    } else {
+        Join-Path $repoRoot "src-tauri\target\release"
+    }
+    $exe = Join-Path $targetRelease "offspring.exe"
     if (-not (Test-Path $exe)) { throw "offspring.exe not at $exe after tauri build" }
 
     # --- 3. shell-ext DLL ------------------------------------------------
@@ -65,9 +74,28 @@ try {
     } finally {
         Pop-Location
     }
-    $dll = Join-Path $repoRoot "shell-ext\target\release\offspring_shell_ext.dll"
-    if (-not (Test-Path $dll)) { throw "offspring_shell_ext.dll not at $dll" }
-    Copy-Item $dll (Join-Path $repoRoot "src-tauri\target\release\") -Force
+    # shell-ext lives in its own Cargo project with its own target dir,
+    # but it ALSO respects CARGO_TARGET_DIR when set. Try the shared dir
+    # first, then fall back to the per-project default.
+    $dll = if ($env:CARGO_TARGET_DIR) {
+        Join-Path $env:CARGO_TARGET_DIR "release\offspring_shell_ext.dll"
+    } else {
+        Join-Path $repoRoot "shell-ext\target\release\offspring_shell_ext.dll"
+    }
+    if (-not (Test-Path $dll)) {
+        # Fallback for the case where shell-ext has its own target dir
+        # (no shared CARGO_TARGET_DIR) but offspring uses the shared one.
+        $alt = Join-Path $repoRoot "shell-ext\target\release\offspring_shell_ext.dll"
+        if (Test-Path $alt) { $dll = $alt }
+        else { throw "offspring_shell_ext.dll not found at $dll" }
+    }
+    # When CARGO_TARGET_DIR is shared across offspring + shell-ext (the
+    # common dev setup), the DLL is already alongside offspring.exe — skip
+    # the copy rather than erroring on "can't overwrite with itself".
+    $dllDest = Join-Path $targetRelease "offspring_shell_ext.dll"
+    if ((Resolve-Path $dll).Path -ne $dllDest) {
+        Copy-Item $dll $targetRelease -Force
+    }
 
     # --- 4. MSIX ---------------------------------------------------------
     Write-Host ""
@@ -79,14 +107,18 @@ try {
     Write-Host ""
     Write-Host "[5/5] Inno Setup (iscc.exe)..." -ForegroundColor Yellow
     $iscc = $null
-    foreach ($cand in @(
-        "C:\Program Files (x86)\Inno Setup 6\iscc.exe",
-        "C:\Program Files\Inno Setup 6\iscc.exe"
-    )) {
+    # Per-machine installs land in Program Files; winget's default
+    # per-user install lands under %LOCALAPPDATA%\Programs\. Check both.
+    $candidates = @(
+        "C:\Program Files (x86)\Inno Setup 6\ISCC.exe",
+        "C:\Program Files\Inno Setup 6\ISCC.exe",
+        (Join-Path $env:LOCALAPPDATA "Programs\Inno Setup 6\ISCC.exe")
+    )
+    foreach ($cand in $candidates) {
         if (Test-Path $cand) { $iscc = $cand; break }
     }
     if (-not $iscc) {
-        $onPath = Get-Command iscc.exe -ErrorAction SilentlyContinue
+        $onPath = Get-Command ISCC.exe -ErrorAction SilentlyContinue
         if ($onPath) { $iscc = $onPath.Source }
     }
     if (-not $iscc) {

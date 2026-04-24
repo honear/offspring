@@ -13,7 +13,12 @@ use windows::Win32::System::Com::IBindCtx;
 use windows::Win32::UI::Shell::*;
 
 use crate::child::ChildCommand;
+use crate::compare::CompareCommand;
+use crate::grayscale::GrayscaleCommand;
+use crate::merge::MergeCommand;
+use crate::overlay::OverlayCommand;
 use crate::presets::{load_presets, read_exe_path};
+use crate::settings::SettingsCommand;
 use crate::util::cotaskmem_wstr;
 
 #[implement(IExplorerCommand)]
@@ -31,6 +36,15 @@ impl RootCommand {
             .map(|p| ChildCommand::new_preset(p).into())
             .collect();
         out.push(ChildCommand::new_custom().into());
+        // Tools live at the end so they sit below the preset list. Each
+        // tool's GetState hides it when its toggle is off, so users who
+        // don't want them never see them. The Settings entry anchors
+        // the bottom and is always visible.
+        out.push(MergeCommand::new().into());
+        out.push(GrayscaleCommand::new().into());
+        out.push(CompareCommand::new().into());
+        out.push(OverlayCommand::new().into());
+        out.push(SettingsCommand::new().into());
         out
     }
 }

@@ -16,9 +16,7 @@
 use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
-use std::os::windows::process::CommandExt;
 use std::path::PathBuf;
-use std::process::Stdio;
 use std::time::Duration;
 use tauri::{AppHandle, Emitter};
 
@@ -160,10 +158,19 @@ pub fn download_update(app: AppHandle, version: String, installer_url: String) -
 }
 
 /// Launch the previously-downloaded installer for `version` and exit the
-/// app so Inno Setup can overwrite `offspring.exe`. A detached PowerShell
-/// watcher waits for the installer process to exit, then relaunches the
-/// freshly-installed exe. If no matching downloaded file exists, returns
-/// an error and does NOT exit.
+/// app so Inno Setup can overwrite `offspring.exe`. If no matching
+/// downloaded file exists, returns an error and does NOT exit.
+///
+/// Relaunch is handled by the installer itself: we pass our custom
+/// `/LAUNCHAFTER` switch, and offspring.iss's `[Run]` section reads that
+/// from `ParamStr`/`GetCmdTail` and fires a `runasoriginaluser nowait`
+/// launch of the new binary once [Files] extraction is done. This is
+/// much more reliable than an in-process PowerShell watcher:
+///   * No detached child fighting Windows job-object inheritance to
+///     survive our exit.
+///   * No file-lock polling race with Inno's fork-to-elevated handoff.
+///   * The launch runs in the user's unelevated context, matching how
+///     Offspring is normally used (per-user AppData/registry writes).
 ///
 /// We deliberately don't pass Inno's `/RESTARTAPPLICATIONS` — it only
 /// works for applications registered with Windows Restart Manager
@@ -181,107 +188,17 @@ pub fn install_update(version: String) -> Result<(), String> {
     // /VERYSILENT — no UI. /NORESTART — never reboot the machine.
     // /SUPPRESSMSGBOXES — pair with /SILENT to swallow any "another
     // instance is running" prompts if the restart-app handshake misfires.
+    // /LAUNCHAFTER — our custom flag; offspring.iss's ShouldLaunchAfter
+    // [Code] check reads it to decide whether to relaunch the new exe.
     std::process::Command::new(&path)
-        .args(["/VERYSILENT", "/NORESTART", "/SUPPRESSMSGBOXES"])
+        .args(["/VERYSILENT", "/NORESTART", "/SUPPRESSMSGBOXES", "/LAUNCHAFTER"])
         .spawn()
         .map_err(|e| format!("spawning installer: {e}"))?;
 
-    // Post-swap relaunch. We can't wait on the installer PID because
-    // Inno Setup forks almost immediately (extracts Setup.tmp, re-launches
-    // elevated, exits the original). Instead, the watcher waits a few
-    // seconds for the installer to start writing, then polls our own exe
-    // file for exclusive read access — that test fails while *any* process
-    // has it open and succeeds once the installer releases it. Then it
-    // waits one more second for Windows to settle the new image and
-    // launches offspring.exe.
-    //
-    // The script is written to disk and invoked via `-File`, with stdio
-    // redirected to NUL and CREATE_NO_WINDOW + DETACHED_PROCESS so it
-    // survives our exit with no console and no parent dependency. Past
-    // attempts to pass the script as an inline `-Command` argument died
-    // silently due to quoting issues across the Rust → CreateProcess →
-    // PowerShell boundary — `-File` sidesteps that entirely.
-    //
-    // Logs land at `%LOCALAPPDATA%\Offspring\update-relaunch.log` so a
-    // silent failure is diagnosable after the fact.
-    let exe = std::env::current_exe()
-        .map_err(|e| format!("locating current exe: {e}"))?;
-    let data_dir = paths::local_data_dir()
-        .map_err(|e| format!("locating local data dir: {e}"))?;
-    std::fs::create_dir_all(&data_dir)
-        .map_err(|e| format!("creating local data dir: {e}"))?;
-    let log = data_dir.join("update-relaunch.log");
-    let script_path = data_dir.join("update-relaunch.ps1");
-    let exe_ps = exe.display().to_string().replace('\'', "''");
-    let log_ps = log.display().to_string().replace('\'', "''");
-    // Two-phase file-lock polling:
-    //   Phase 1: wait for the installer to LOCK offspring.exe (i.e. start
-    //            overwriting it). A plain mtime check would be simpler but
-    //            isn't reliable — Inno Setup touches the file metadata
-    //            multiple times during extraction.
-    //   Phase 2: wait for the file to UNLOCK (installer done writing).
-    // If Phase 1 times out we assume the installer skipped the exe swap
-    // (e.g. "same version") and relaunch immediately. If Phase 2 times
-    // out we give up — the install is broken and we don't want to launch
-    // a half-written binary.
-    let script = format!(
-        "$exe = '{exe_ps}'\r\n\
-         $log = '{log_ps}'\r\n\
-         function Log($m) {{ \"[$(Get-Date -Format o)] $m\" | Out-File -FilePath $log -Append -Encoding utf8 }}\r\n\
-         function IsLocked {{ \r\n\
-             try {{ \r\n\
-                 $s = [System.IO.File]::Open($exe, 'Open', 'Read', 'None')\r\n\
-                 $s.Close()\r\n\
-                 return $false\r\n\
-             }} catch {{ return $true }}\r\n\
-         }}\r\n\
-         Log \"watcher started, target $exe\"\r\n\
-         $lockedSeen = $false\r\n\
-         for ($i = 0; $i -lt 60; $i++) {{\r\n\
-             Start-Sleep -Seconds 1\r\n\
-             if (IsLocked) {{ $lockedSeen = $true; break }}\r\n\
-         }}\r\n\
-         Log \"phase1 lockedSeen=$lockedSeen after $i sec\"\r\n\
-         if ($lockedSeen) {{\r\n\
-             for ($j = 0; $j -lt 120; $j++) {{\r\n\
-                 Start-Sleep -Seconds 1\r\n\
-                 if (-not (IsLocked)) {{ break }}\r\n\
-             }}\r\n\
-             Log \"phase2 unlocked after $j sec\"\r\n\
-             if (IsLocked) {{ Log 'still locked after phase2 timeout, aborting'; exit 1 }}\r\n\
-         }}\r\n\
-         Start-Sleep -Seconds 2\r\n\
-         try {{\r\n\
-             Start-Process -FilePath $exe -ErrorAction Stop\r\n\
-             Log 'relaunch OK'\r\n\
-         }} catch {{\r\n\
-             Log \"relaunch FAIL: $($_.Exception.Message)\"\r\n\
-         }}\r\n"
-    );
-    std::fs::write(&script_path, script)
-        .map_err(|e| format!("writing relaunch script: {e}"))?;
-
-    const DETACHED_PROCESS: u32 = 0x0000_0008;
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    std::process::Command::new("powershell.exe")
-        .args([
-            "-NoProfile",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-WindowStyle",
-            "Hidden",
-            "-File",
-            script_path.to_str().unwrap_or(""),
-        ])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .creation_flags(DETACHED_PROCESS | CREATE_NO_WINDOW)
-        .spawn()
-        .map_err(|e| format!("spawning relaunch watcher: {e}"))?;
-
-    // Give the watcher and installer a beat to initialize before we
-    // release our own exe file handle by exiting.
+    // Give the installer a beat to start up (and for Windows to elevate
+    // via UAC on its manifest) before we release our own exe file handle
+    // by exiting — the installer can't overwrite offspring.exe while
+    // we still hold it.
     std::thread::sleep(Duration::from_millis(500));
     std::process::exit(0);
 }

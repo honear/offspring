@@ -19,10 +19,88 @@ pub struct Preset {
     pub icon: Option<String>,
 }
 
+/// Settings subset the shell-ext cares about. We deliberately mirror
+/// only the fields we need instead of pulling the whole struct from the
+/// main app — the DLL runs inside Explorer, so minimizing its parse
+/// surface keeps parse failures on unrelated additions from breaking
+/// menu rendering.
+#[derive(Deserialize, Clone, Debug, Default)]
+pub struct Settings {
+    #[serde(default)]
+    pub tools: ToolsSettings,
+}
+
+#[derive(Deserialize, Clone, Debug, Default)]
+pub struct ToolsSettings {
+    #[serde(default)]
+    pub merge: MergeTool,
+    #[serde(default)]
+    pub grayscale: GrayscaleTool,
+    #[serde(default)]
+    pub compare: CompareTool,
+    #[serde(default)]
+    pub overlay: OverlayTool,
+}
+
+#[derive(Deserialize, Clone, Debug)]
+pub struct MergeTool {
+    pub enabled: bool,
+}
+
+impl Default for MergeTool {
+    fn default() -> Self {
+        // Mirrors the main app's default — on by default now that Merge
+        // is a single leaf entry (no sub-flyout, no preset picker). The
+        // shell-ext reads this when settings.json is absent; otherwise
+        // the user's saved value wins.
+        Self { enabled: true }
+    }
+}
+
+#[derive(Deserialize, Clone, Debug)]
+pub struct GrayscaleTool {
+    pub enabled: bool,
+}
+
+impl Default for GrayscaleTool {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
+}
+
+#[derive(Deserialize, Clone, Debug)]
+pub struct CompareTool {
+    pub enabled: bool,
+}
+
+impl Default for CompareTool {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
+}
+
+#[derive(Deserialize, Clone, Debug)]
+pub struct OverlayTool {
+    pub enabled: bool,
+}
+
+impl Default for OverlayTool {
+    fn default() -> Self {
+        Self { enabled: false }
+    }
+}
+
 fn presets_path() -> Option<PathBuf> {
     let mut p = dirs::data_dir()?;
     p.push("Offspring");
     p.push("presets.json");
+    Some(p)
+}
+
+fn settings_path() -> Option<PathBuf> {
+    let mut p = dirs::data_dir()?;
+    p.push("Offspring");
+    p.push("settings.json");
     Some(p)
 }
 
@@ -69,4 +147,10 @@ pub fn load_presets() -> Vec<Preset> {
     let Some(path) = presets_path() else { return Vec::new() };
     let Ok(raw) = std::fs::read_to_string(&path) else { return Vec::new() };
     serde_json::from_str::<Vec<Preset>>(&raw).unwrap_or_default()
+}
+
+pub fn load_settings() -> Settings {
+    let Some(path) = settings_path() else { return Settings::default() };
+    let Ok(raw) = std::fs::read_to_string(&path) else { return Settings::default() };
+    serde_json::from_str::<Settings>(&raw).unwrap_or_default()
 }

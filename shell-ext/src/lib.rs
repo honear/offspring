@@ -21,9 +21,14 @@ use windows::Win32::Foundation::*;
 use windows::Win32::System::Com::*;
 
 mod child;
+mod compare;
+mod grayscale;
 mod launch;
+mod merge;
+mod overlay;
 mod presets;
 mod root;
+mod settings;
 mod util;
 
 /// Class ID exposed to Windows. Must match the value in the MSIX manifest

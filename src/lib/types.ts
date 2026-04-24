@@ -21,6 +21,13 @@ export interface Preset {
   audio_bitrate?: string | null;
   use_cuda?: boolean | null;
   target_max_mb?: number | null;
+  /** Desaturate the output to greyscale. Independent of format — works
+   *  on both GIF and MP4. Also reachable as a standalone Tool. */
+  grayscale?: boolean | null;
+  /** Burn in the current frame number in the top-left corner using
+   *  Consolas. Independent of format. Also available as an Overlay
+   *  feature when that tool lands. */
+  timecode?: boolean | null;
   icon?: string | null;
   order: number;
 }
@@ -38,6 +45,97 @@ export interface Settings {
    *  an MSIX sparse package. Off by default; flipping on prompts the user
    *  to trust our self-signed cert. */
   modern_menu_enabled?: boolean | null;
+  /** Extension tools: auto-sequence detection, merge, etc. Always present
+   *  — Rust fills in defaults for missing fields when loading old settings. */
+  tools?: ToolsSettings;
+}
+
+export interface ToolsSettings {
+  sequence: SequenceTool;
+  merge: MergeTool;
+  grayscale: GrayscaleTool;
+  compare: CompareTool;
+  overlay: OverlayTool;
+}
+
+export interface SequenceTool {
+  /** On by default. When enabled, right-clicking a numbered image frame
+   *  auto-expands to the full sequence before encoding. */
+  enabled: boolean;
+  /** Minimum zero-padded digit count that counts as a sequence. Default 4
+   *  — matches VFX convention (render_0001.png) and filters out version
+   *  tags like r01 / v02. */
+  min_digits: number;
+  /** Fallback framerate used when the preset doesn't specify one. VFX /
+   *  broadcast rates (23.976, 29.97) are allowed. Preset.fps wins over
+   *  this when set — only MP4 presets that leave fps unset fall back. */
+  default_fps: number;
+}
+
+export interface MergeTool {
+  /** On by default. Shows a "Merge" leaf entry in the Windows 11
+   *  modern right-click menu for multi-file selections. */
+  enabled: boolean;
+}
+
+export interface GrayscaleTool {
+  /** On by default. Shows a "Greyscale" leaf entry that converts each
+   *  selected file to a greyscale copy, preserving its format, size
+   *  and fps. */
+  enabled: boolean;
+}
+
+export type OverlaySlot = "none" | "filename" | "timecode" | "custom" | "custom2";
+
+export interface CompareTool {
+  /** On by default. Shows a "Compare" leaf entry that hstacks all
+   *  selected files into a single side-by-side output for A/B review.
+   *  Only appears when ≥2 files are selected. */
+  enabled: boolean;
+}
+
+export interface OverlayTool {
+  /** Off by default — niche workflow. Per-file encode that burns
+   *  corner text + optional border + optional aspect-ratio guides. */
+  enabled: boolean;
+  top_left: OverlaySlot;
+  top_right: OverlaySlot;
+  bottom_left: OverlaySlot;
+  bottom_right: OverlaySlot;
+  /** Shared text used by any corner whose slot is "custom". */
+  custom_text: string;
+  /** Second independent text slot, paired with the "custom2" dropdown
+   *  option so one overlay can carry two arbitrary labels at once. */
+  custom_text_2: string;
+  /** 0–100 UI opacity. Mapped to 0.0–1.0 inside the ffmpeg filter. */
+  opacity: number;
+  /** ffmpeg-parseable color (e.g. "white", "0xffcc00"). The UI sends
+   *  hex-ish strings with a leading "0x". */
+  color: string;
+  /** Pad the clip with equal black bars on all four sides so corner
+   *  text sits in the border instead of on top of the image. */
+  border: boolean;
+  /** "Add metadata" toggle: when false, corner text + border + the
+   *  color/opacity controls they depend on do nothing — only the
+   *  Guides half of the pane is emitted. */
+  metadata: boolean;
+  /** "Add guides" toggle. When true, draw the aspect-ratio guide
+   *  boxes on top of the clip (the per-ratio show_* booleans pick
+   *  which boxes). When false, no guide boxes are drawn regardless. */
+  guides: boolean;
+  show_16_9: boolean;
+  show_9_16: boolean;
+  show_4_5: boolean;
+  color_16_9: string;
+  color_9_16: string;
+  color_4_5: string;
+  /** 0–100 UI opacity applied to the guide boxes (separate from
+   *  the corner-text opacity above). Defaults to 90. */
+  guides_opacity: number;
+  /** Font size as a percentage (50–200, default 100). Scales the
+   *  corner text, its margin from the frame edge, and the box-border
+   *  width together so layout stays balanced. */
+  metadata_font_scale: number;
 }
 
 export interface FfmpegStatus {

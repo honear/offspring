@@ -48,12 +48,14 @@ impl IExplorerCommand_Impl for ChildCommand_Impl {
     }
 
     fn GetIcon(&self, _items: Option<&IShellItemArray>) -> Result<PWSTR> {
-        // Prefer the preset's custom icon, otherwise fall back to
-        // offspring.exe's default icon (index 0).
-        if let Action::Preset { icon: Some(icon), .. } = &self.action {
-            if !icon.is_empty() {
-                return Ok(cotaskmem_wstr(icon));
-            }
+        // Prefer the preset's custom icon if one was configured;
+        // otherwise fall back to offspring.exe's default icon.
+        let icon = match &self.action {
+            Action::Preset { icon: Some(i), .. } if !i.is_empty() => Some(i.clone()),
+            _ => None,
+        };
+        if let Some(i) = icon {
+            return Ok(cotaskmem_wstr(&i));
         }
         match read_exe_path() {
             Some(exe) => Ok(cotaskmem_wstr(&format!("{exe},0"))),

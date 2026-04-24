@@ -8,6 +8,9 @@
 
   let presets = $state<Preset[]>([]);
   let selectedId = $state<string | null>(null);
+  let selectedToolId = $state<
+    "sequence" | "merge" | "grayscale" | "compare" | "overlay" | null
+  >(null);
   let settings = $state<Settings>({});
   let ffmpeg = $state<FfmpegStatus>({ found: false, path: null });
   let tab = $state<"presets" | "settings">("presets");
@@ -66,6 +69,139 @@
   let currentVersion = $state<string>("");
 
   const selected = $derived(presets.find((p) => p.id === selectedId) ?? null);
+
+  // Static catalog of tools rendered in the sidebar. Keeping the metadata
+  // in-page (rather than fetched from Rust) because it's small, stable, and
+  // the enabled/min-digits state already lives under `settings.tools`.
+  const TOOLS = [
+    {
+      id: "sequence" as const,
+      name: "Sequence",
+      blurb: "Auto-detect numbered image sequences",
+    },
+    {
+      id: "merge" as const,
+      name: "Merge",
+      blurb: "Concatenate multiple videos into one",
+    },
+    {
+      id: "grayscale" as const,
+      name: "Greyscale",
+      blurb: "One-click greyscale copy of any video/GIF",
+    },
+    {
+      id: "compare" as const,
+      name: "Compare",
+      blurb: "Stack videos side-by-side for A/B review",
+    },
+    {
+      id: "overlay" as const,
+      name: "Overlay",
+      blurb: "Burn metadata or aspect-ratio guides into each frame",
+    },
+  ];
+
+  /** Ensure `settings.tools` exists with full defaults — the Rust side
+   *  fills these in on disk, but a freshly-loaded Settings object might
+   *  still have `undefined` subfields while migrating in. Call this
+   *  before binding to any `settings.tools.*` field. */
+  /** Convert an ffmpeg-style color string (e.g. "white", "0xffcc00",
+   *  "#abc123") to the `#rrggbb` form the native color picker expects.
+   *  Unknown names fall back to white rather than blanking the picker. */
+  function colorToHex(c: string): string {
+    if (!c) return "#ffffff";
+    const trimmed = c.trim();
+    if (trimmed.startsWith("#")) return trimmed.toLowerCase();
+    if (trimmed.startsWith("0x") || trimmed.startsWith("0X")) {
+      return "#" + trimmed.slice(2).toLowerCase();
+    }
+    const named: Record<string, string> = {
+      white: "#ffffff",
+      black: "#000000",
+      red: "#ff0000",
+      green: "#00ff00",
+      blue: "#0000ff",
+      yellow: "#ffff00",
+      cyan: "#00ffff",
+      magenta: "#ff00ff",
+    };
+    return named[trimmed.toLowerCase()] ?? "#ffffff";
+  }
+
+  function ensureTools() {
+    if (!settings.tools) {
+      settings.tools = {
+        sequence: { enabled: true, min_digits: 4, default_fps: 24 },
+        merge: { enabled: true },
+        grayscale: { enabled: true },
+        compare: { enabled: true },
+        overlay: {
+          enabled: false,
+          top_left: "filename",
+          top_right: "none",
+          bottom_left: "none",
+          bottom_right: "timecode",
+          custom_text: "",
+          custom_text_2: "",
+          opacity: 90,
+          color: "white",
+          border: false,
+          metadata: true,
+          guides: false,
+          show_16_9: true,
+          show_9_16: true,
+          show_4_5: false,
+          color_16_9: "0xe5484d",
+          color_9_16: "0x00c2d7",
+          color_4_5: "0xf5d90a",
+          guides_opacity: 90,
+          metadata_font_scale: 100,
+        },
+      };
+    }
+    if (!settings.tools.sequence) {
+      settings.tools.sequence = { enabled: true, min_digits: 4, default_fps: 24 };
+    }
+    if (settings.tools.sequence.default_fps == null) {
+      settings.tools.sequence.default_fps = 24;
+    }
+    if (!settings.tools.merge) settings.tools.merge = { enabled: true };
+    if (!settings.tools.grayscale) settings.tools.grayscale = { enabled: true };
+    if (!settings.tools.compare) settings.tools.compare = { enabled: true };
+    if (!settings.tools.overlay) {
+      settings.tools.overlay = {
+        enabled: false,
+        top_left: "filename",
+        top_right: "none",
+        bottom_left: "none",
+        bottom_right: "timecode",
+        custom_text: "",
+        custom_text_2: "",
+        opacity: 90,
+        color: "white",
+        border: false,
+        metadata: true,
+        guides: false,
+        show_16_9: true,
+        show_9_16: true,
+        show_4_5: false,
+        color_16_9: "0xe5484d",
+        color_9_16: "0x00c2d7",
+        color_4_5: "0xf5d90a",
+        guides_opacity: 90,
+        metadata_font_scale: 100,
+      };
+    }
+    // Back-fill overlay fields for settings loaded from older installs
+    // so newly-added toggles start from sane defaults.
+    if (settings.tools.overlay.custom_text_2 == null) settings.tools.overlay.custom_text_2 = "";
+    if (settings.tools.overlay.color_16_9 == null) settings.tools.overlay.color_16_9 = "0xe5484d";
+    if (settings.tools.overlay.color_9_16 == null) settings.tools.overlay.color_9_16 = "0x00c2d7";
+    if (settings.tools.overlay.color_4_5 == null) settings.tools.overlay.color_4_5 = "0xf5d90a";
+    if (settings.tools.overlay.metadata == null) settings.tools.overlay.metadata = true;
+    if (settings.tools.overlay.guides_opacity == null) settings.tools.overlay.guides_opacity = 90;
+    if (settings.tools.overlay.metadata_font_scale == null) settings.tools.overlay.metadata_font_scale = 100;
+  }
 
   onMount(async () => {
     await reload();
@@ -247,8 +383,9 @@
   async function reload() {
     presets = await api.listPresets();
     settings = await api.getSettings();
+    ensureTools();
     ffmpeg = await api.ffmpegStatus();
-    if (!selectedId && presets.length > 0) selectedId = presets[0].id;
+    if (!selectedId && !selectedToolId && presets.length > 0) selectedId = presets[0].id;
     // First-run guidance: if FFmpeg is missing on app open, surface the
     // Settings tab directly so the big "Download FFmpeg" button is the
     // first thing they see instead of a silently-broken app.
@@ -291,6 +428,7 @@
     };
     presets = [...presets, fresh];
     selectedId = fresh.id;
+    selectedToolId = null;
     dirty = true;
   }
 
@@ -303,6 +441,7 @@
     };
     presets = [...presets, copy];
     selectedId = copy.id;
+    selectedToolId = null;
     dirty = true;
   }
 
@@ -548,13 +687,14 @@
               ondragover={(e) => onDragOver(e, p)}
               ondrop={(e) => onDrop(e, p)}
               ondragend={onDragEnd}
-              onclick={() => (selectedId = p.id)}
+              onclick={() => { selectedId = p.id; selectedToolId = null; }}
               oncontextmenu={(e) => {
                 e.preventDefault();
                 selectedId = p.id;
+                selectedToolId = null;
                 ctxMenu = { x: e.clientX, y: e.clientY, preset: p };
               }}
-              onkeydown={(e) => e.key === "Enter" && (selectedId = p.id)}
+              onkeydown={(e) => e.key === "Enter" && ((selectedId = p.id), (selectedToolId = null))}
               role="button"
               tabindex="0"
             >
@@ -574,13 +714,437 @@
             </li>
           {/each}
         </ul>
+
+        <div class="sidebar-head tools-head">
+          <span class="tiny">TOOLS</span>
+        </div>
+        <ul class="tool-list">
+          {#each TOOLS as t (t.id)}
+            <li
+              class="row-item tool-row"
+              class:active={selectedToolId === t.id}
+              onclick={() => { selectedToolId = t.id; selectedId = null; }}
+              onkeydown={(e) => e.key === "Enter" && ((selectedToolId = t.id), (selectedId = null))}
+              role="button"
+              tabindex="0"
+            >
+              <input
+                type="checkbox"
+                checked={settings.tools?.[t.id]?.enabled ?? (t.id === "overlay" ? false : true)}
+                onclick={(e) => e.stopPropagation()}
+                onchange={(e) => {
+                  ensureTools();
+                  const v = (e.currentTarget as HTMLInputElement).checked;
+                  settings.tools![t.id].enabled = v;
+                  saveSettings();
+                }}
+                title="Enable tool"
+              />
+              <span class="tool-name">{t.name}</span>
+            </li>
+          {/each}
+        </ul>
+
         <div class="sidebar-foot">
           <button class="ghost" onclick={resetDefaults}>Reset to defaults</button>
         </div>
       </aside>
 
       <section class="editor">
-        {#if selected}
+        {#if selectedToolId === "sequence"}
+          <div class="editor-head">
+            <h2 class="tool-title">Sequence</h2>
+          </div>
+          <p class="muted">
+            When you right-click a numbered image (e.g. <code>render_0001.png</code>),
+            Offspring auto-expands the selection to include every matching frame
+            in the same folder and feeds them through ffmpeg's image sequence
+            demuxer. Use the preset's FPS to control playback speed.
+          </p>
+          <p class="muted tiny">
+            Frames must share the same filename stem, extension, and digit
+            width. <code>render_0001.png</code> / <code>render_0002.png</code>
+            match; <code>render_v01.png</code> / <code>render_v02.png</code>
+            don't (too few digits by default).
+          </p>
+
+          <div class="fields tool-fields">
+            <label class="inline">
+              <input
+                type="checkbox"
+                checked={settings.tools?.sequence.enabled ?? true}
+                onchange={(e) => {
+                  ensureTools();
+                  settings.tools!.sequence.enabled = (e.currentTarget as HTMLInputElement).checked;
+                  saveSettings();
+                }}
+              />
+              <span>Auto-detect image sequences on right-click</span>
+            </label>
+
+            <label class="field">
+              <span>Minimum digits</span>
+              <input
+                type="number"
+                min="1"
+                max="10"
+                value={settings.tools?.sequence.min_digits ?? 4}
+                onchange={(e) => {
+                  ensureTools();
+                  const v = parseInt((e.currentTarget as HTMLInputElement).value, 10);
+                  if (Number.isFinite(v) && v >= 1 && v <= 10) {
+                    settings.tools!.sequence.min_digits = v;
+                    saveSettings();
+                  }
+                }}
+              />
+              <span class="muted tiny">
+                Files ending in fewer zero-padded digits than this are treated
+                as standalone images, not sequences. Default 4 matches the VFX
+                convention (<code>_0001</code>) and filters out version tags
+                like <code>v01</code>.
+              </span>
+            </label>
+
+            <label class="field">
+              <span>Default FPS</span>
+              <select
+                value={String(settings.tools?.sequence.default_fps ?? 24)}
+                onchange={(e) => {
+                  ensureTools();
+                  const v = parseFloat((e.currentTarget as HTMLSelectElement).value);
+                  if (Number.isFinite(v) && v > 0) {
+                    settings.tools!.sequence.default_fps = v;
+                    saveSettings();
+                  }
+                }}
+              >
+                <option value="23.976">23.976 (film / NTSC)</option>
+                <option value="24">24 (film)</option>
+                <option value="25">25 (PAL)</option>
+                <option value="29.97">29.97 (NTSC)</option>
+                <option value="30">30</option>
+                <option value="48">48</option>
+                <option value="50">50</option>
+                <option value="59.94">59.94</option>
+                <option value="60">60</option>
+              </select>
+              <span class="muted tiny">
+                Used when a preset doesn't specify its own FPS — so a
+                sequence→MP4 through a size-based preset plays at the
+                right rate. GIF presets typically set their own FPS and
+                ignore this.
+              </span>
+            </label>
+          </div>
+        {:else if selectedToolId === "merge"}
+          <div class="editor-head">
+            <h2 class="tool-title">Merge</h2>
+          </div>
+          <p class="muted">
+            Concatenate multiple videos or GIFs into a single file. Offspring
+            detects the output format and settings (dimensions, framerate)
+            from the first selected file, then re-encodes the rest to match.
+            Files are merged in filename order.
+          </p>
+          <p class="muted tiny">
+            Appears as a single <strong>Merge</strong> entry in the right-click
+            menu (and as <code>Offspring Merge</code> in Send to) when two or
+            more files are selected. Single-file right-clicks never show it.
+            Enable/disable from the Tools sidebar on the left.
+          </p>
+        {:else if selectedToolId === "grayscale"}
+          <div class="editor-head">
+            <h2 class="tool-title">Greyscale</h2>
+          </div>
+          <p class="muted">
+            One-click greyscale copy of any video or GIF. Each selected file
+            is re-encoded to a desaturated version alongside the original,
+            inheriting its format, dimensions, and framerate. Output filename
+            is <code>&lt;name&gt;_gray.&lt;ext&gt;</code>.
+          </p>
+          <p class="muted tiny">
+            Appears as a standalone <strong>Greyscale</strong> entry in the
+            right-click menu (and as <code>Offspring Greyscale</code> in
+            Send to). For quality-tuned greyscale conversions, check
+            <em>Greyscale</em> inside any saved preset instead.
+            Enable/disable from the Tools sidebar on the left.
+          </p>
+        {:else if selectedToolId === "compare"}
+          <div class="editor-head">
+            <h2 class="tool-title">Compare</h2>
+          </div>
+          <p class="muted">
+            Stack two or more selected videos side-by-side for A/B review.
+            Each input is scaled to the first file's height and re-timed
+            to a shared framerate. Output is
+            <code>&lt;first-name&gt;_compare.&lt;ext&gt;</code>.
+          </p>
+          <p class="muted tiny">
+            On by default. The entry is hidden unless at least two files
+            are selected. Enable/disable from the Tools sidebar on the left.
+          </p>
+        {:else if selectedToolId === "overlay"}
+          <div class="editor-head">
+            <h2 class="tool-title">Overlay</h2>
+          </div>
+          <p class="muted">
+            Draw aspect-ratio guide boxes and/or burn filename, timecode,
+            or custom text into each corner. Output is
+            <code>&lt;name&gt;_overlay.&lt;ext&gt;</code>.
+          </p>
+          <p class="muted tiny">
+            Off by default — enable from the Tools sidebar on the left to
+            show an <strong>Overlay</strong> entry in the right-click menu.
+          </p>
+
+          <div class="fields tool-fields">
+            <label class="inline">
+              <input
+                type="checkbox"
+                checked={settings.tools?.overlay.guides ?? false}
+                onchange={(e) => {
+                  ensureTools();
+                  settings.tools!.overlay.guides = (e.currentTarget as HTMLInputElement).checked;
+                  saveSettings();
+                }}
+              />
+              <span><strong>Add guides</strong></span>
+            </label>
+
+            {#if settings.tools?.overlay.guides}
+              <div class="guide-row indent">
+                <label class="inline">
+                  <input
+                    type="checkbox"
+                    checked={settings.tools?.overlay.show_16_9 ?? true}
+                    onchange={(e) => {
+                      ensureTools();
+                      settings.tools!.overlay.show_16_9 = (e.currentTarget as HTMLInputElement).checked;
+                      saveSettings();
+                    }}
+                  />
+                  <span>16:9 guide</span>
+                </label>
+                <input
+                  type="color"
+                  aria-label="16:9 guide color"
+                  value={colorToHex(settings.tools?.overlay.color_16_9 ?? "0xe5484d")}
+                  oninput={(e) => {
+                    ensureTools();
+                    const hex = (e.currentTarget as HTMLInputElement).value;
+                    settings.tools!.overlay.color_16_9 = "0x" + hex.replace(/^#/, "");
+                  }}
+                  onchange={() => saveSettings()}
+                />
+              </div>
+              <div class="guide-row indent">
+                <label class="inline">
+                  <input
+                    type="checkbox"
+                    checked={settings.tools?.overlay.show_9_16 ?? true}
+                    onchange={(e) => {
+                      ensureTools();
+                      settings.tools!.overlay.show_9_16 = (e.currentTarget as HTMLInputElement).checked;
+                      saveSettings();
+                    }}
+                  />
+                  <span>9:16 guide</span>
+                </label>
+                <input
+                  type="color"
+                  aria-label="9:16 guide color"
+                  value={colorToHex(settings.tools?.overlay.color_9_16 ?? "0x00c2d7")}
+                  oninput={(e) => {
+                    ensureTools();
+                    const hex = (e.currentTarget as HTMLInputElement).value;
+                    settings.tools!.overlay.color_9_16 = "0x" + hex.replace(/^#/, "");
+                  }}
+                  onchange={() => saveSettings()}
+                />
+              </div>
+              <div class="guide-row indent">
+                <label class="inline">
+                  <input
+                    type="checkbox"
+                    checked={settings.tools?.overlay.show_4_5 ?? false}
+                    onchange={(e) => {
+                      ensureTools();
+                      settings.tools!.overlay.show_4_5 = (e.currentTarget as HTMLInputElement).checked;
+                      saveSettings();
+                    }}
+                  />
+                  <span>4:5 guide</span>
+                </label>
+                <input
+                  type="color"
+                  aria-label="4:5 guide color"
+                  value={colorToHex(settings.tools?.overlay.color_4_5 ?? "0xf5d90a")}
+                  oninput={(e) => {
+                    ensureTools();
+                    const hex = (e.currentTarget as HTMLInputElement).value;
+                    settings.tools!.overlay.color_4_5 = "0x" + hex.replace(/^#/, "");
+                  }}
+                  onchange={() => saveSettings()}
+                />
+              </div>
+              <label class="field indent">
+                <span>Guides opacity ({settings.tools?.overlay.guides_opacity ?? 90}%)</span>
+                <input
+                  type="range"
+                  min="10"
+                  max="100"
+                  step="5"
+                  value={settings.tools?.overlay.guides_opacity ?? 90}
+                  oninput={(e) => {
+                    ensureTools();
+                    const v = parseInt((e.currentTarget as HTMLInputElement).value, 10);
+                    if (Number.isFinite(v)) settings.tools!.overlay.guides_opacity = v;
+                  }}
+                  onchange={() => saveSettings()}
+                />
+              </label>
+            {/if}
+
+            <label class="inline">
+              <input
+                type="checkbox"
+                checked={settings.tools?.overlay.metadata ?? true}
+                onchange={(e) => {
+                  ensureTools();
+                  settings.tools!.overlay.metadata = (e.currentTarget as HTMLInputElement).checked;
+                  saveSettings();
+                }}
+              />
+              <span><strong>Add metadata</strong></span>
+            </label>
+
+            {#if settings.tools?.overlay.metadata ?? true}
+              <div class="corners-grid indent">
+                {#each [
+                  { key: "top_left", label: "Top left" },
+                  { key: "top_right", label: "Top right" },
+                  { key: "bottom_left", label: "Bottom left" },
+                  { key: "bottom_right", label: "Bottom right" },
+                ] as corner (corner.key)}
+                  <label class="field">
+                    <span>{corner.label}</span>
+                    <select
+                      value={(settings.tools?.overlay as any)?.[corner.key] ?? "none"}
+                      onchange={(e) => {
+                        ensureTools();
+                        (settings.tools!.overlay as any)[corner.key] =
+                          (e.currentTarget as HTMLSelectElement).value;
+                        saveSettings();
+                      }}
+                    >
+                      <option value="none">None</option>
+                      <option value="filename">Filename</option>
+                      <option value="timecode">Timecode</option>
+                      <option value="custom">Custom 1…</option>
+                      <option value="custom2">Custom 2…</option>
+                    </select>
+                  </label>
+                {/each}
+              </div>
+
+              <label class="field indent">
+                <span>Custom text 1</span>
+                <input
+                  type="text"
+                  placeholder="e.g. SH010"
+                  value={settings.tools?.overlay.custom_text ?? ""}
+                  oninput={(e) => {
+                    ensureTools();
+                    settings.tools!.overlay.custom_text = (e.currentTarget as HTMLInputElement).value;
+                  }}
+                  onchange={() => saveSettings()}
+                />
+                <span class="muted tiny">
+                  Shared across every corner set to "Custom 1…".
+                </span>
+              </label>
+
+              <label class="field indent">
+                <span>Custom text 2</span>
+                <input
+                  type="text"
+                  placeholder="e.g. v03 or Animatic"
+                  value={settings.tools?.overlay.custom_text_2 ?? ""}
+                  oninput={(e) => {
+                    ensureTools();
+                    settings.tools!.overlay.custom_text_2 = (e.currentTarget as HTMLInputElement).value;
+                  }}
+                  onchange={() => saveSettings()}
+                />
+                <span class="muted tiny">
+                  Shared across every corner set to "Custom 2…".
+                </span>
+              </label>
+
+              <label class="field indent">
+                <span>Text opacity ({settings.tools?.overlay.opacity ?? 90}%)</span>
+                <input
+                  type="range"
+                  min="10"
+                  max="100"
+                  step="5"
+                  value={settings.tools?.overlay.opacity ?? 90}
+                  oninput={(e) => {
+                    ensureTools();
+                    const v = parseInt((e.currentTarget as HTMLInputElement).value, 10);
+                    if (Number.isFinite(v)) settings.tools!.overlay.opacity = v;
+                  }}
+                  onchange={() => saveSettings()}
+                />
+              </label>
+
+              <label class="field indent">
+                <span>Font size ({settings.tools?.overlay.metadata_font_scale ?? 100}%)</span>
+                <input
+                  type="range"
+                  min="50"
+                  max="200"
+                  step="10"
+                  value={settings.tools?.overlay.metadata_font_scale ?? 100}
+                  oninput={(e) => {
+                    ensureTools();
+                    const v = parseInt((e.currentTarget as HTMLInputElement).value, 10);
+                    if (Number.isFinite(v)) settings.tools!.overlay.metadata_font_scale = v;
+                  }}
+                  onchange={() => saveSettings()}
+                />
+              </label>
+
+              <label class="field indent">
+                <span>Text color</span>
+                <input
+                  type="color"
+                  value={colorToHex(settings.tools?.overlay.color ?? "white")}
+                  oninput={(e) => {
+                    ensureTools();
+                    const hex = (e.currentTarget as HTMLInputElement).value;
+                    settings.tools!.overlay.color = "0x" + hex.replace(/^#/, "");
+                  }}
+                  onchange={() => saveSettings()}
+                />
+              </label>
+
+              <label class="inline indent">
+                <input
+                  type="checkbox"
+                  checked={settings.tools?.overlay.border ?? false}
+                  onchange={(e) => {
+                    ensureTools();
+                    settings.tools!.overlay.border = (e.currentTarget as HTMLInputElement).checked;
+                    saveSettings();
+                  }}
+                />
+                <span>Add border strip so text doesn't cover the image</span>
+              </label>
+            {/if}
+          </div>
+        {:else if selected}
           <div class="editor-head">
             <input
               class="title-input"
@@ -668,28 +1232,11 @@
       </div>
 
       <div class="card">
-        <h3>FFmpeg verbosity</h3>
-        <select
-          value={settings.verbosity ?? "warning"}
-          onchange={(e) => {
-            settings.verbosity = (e.currentTarget as HTMLSelectElement).value;
-          }}
-        >
-          <option value="warning">warning</option>
-          <option value="info">info</option>
-          <option value="error">error</option>
-        </select>
-        <div class="row" style="margin-top: 12px;">
-          <button onclick={saveSettings}>Save</button>
-        </div>
-      </div>
-
-      <div class="card">
         <h3>Right-click menu</h3>
         <p class="muted tiny">
           By default, Offspring lives under Windows 11's "Show more options" (the classic right-click menu).
           Enabling the modern menu below moves it to the top-level right-click menu — it won't also appear
-          under "Show more options", so you don't end up with two entries.
+          under "Show more options", so you don't end up with two entries. You might have to restart Explorer.
         </p>
         <div style="margin-top: 12px; display: flex; flex-direction: column; gap: 10px;">
           <label class="inline">
@@ -731,12 +1278,6 @@
             />
             <span>Integrate with the <strong>Windows 11 modern right-click menu</strong> (top-level, no extra click)</span>
           </label>
-          <p class="tiny muted" style="margin: 0; padding-left: 22px;">
-            Enabling the modern menu registers a sparse MSIX package. The installer already trusted the
-            signing cert, so no prompts appear here. Offspring will offer to restart Windows Explorer so
-            the menu shows up right away — skip it if you have File Explorer windows open and it will
-            take effect after the next sign-out.
-          </p>
         </div>
       </div>
 
@@ -997,6 +1538,91 @@
   }
   .row-item[draggable="true"] { cursor: pointer; }
   .row-item[draggable="true"]:active .grip { cursor: grabbing; }
+
+  .tools-head {
+    margin-top: 6px;
+    border-top: 1px solid var(--c-border);
+    padding-top: 10px;
+  }
+  .tool-list {
+    list-style: none;
+    padding: 2px 6px;
+    margin: 0;
+    flex: 0 0 auto;
+  }
+  .tool-row { padding: 6px; }
+  .tool-name {
+    flex: 1;
+    font-size: var(--fs-14);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .tool-title {
+    margin: 0;
+    font-size: var(--fs-18, 18px);
+    font-weight: 600;
+  }
+  .tool-fields {
+    margin-top: 14px;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+  }
+  .tool-fields .field {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .tool-fields .field > input[type="number"] {
+    max-width: 120px;
+  }
+  /* Color swatches next to each guide-ratio checkbox so the label
+     mirrors the drawbox color the user will see in the output. */
+  .swatch {
+    display: inline-block;
+    width: 10px;
+    height: 10px;
+    border-radius: 2px;
+    margin-left: 4px;
+    vertical-align: middle;
+    border: 1px solid var(--c-border);
+  }
+  .swatch.red { background: #e5484d; }
+  .swatch.cyan { background: #00c2d7; }
+  .swatch.yellow { background: #f5d90a; }
+
+  /* Two-column grid for the four overlay corner dropdowns. Collapses to
+     a single column on very narrow panes. */
+  .corners-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 10px 14px;
+  }
+  @media (max-width: 520px) {
+    .corners-grid { grid-template-columns: 1fr; }
+  }
+  /* Sub-checkboxes for the optional Guides block inside Overlay. */
+  .tool-fields .inline.indent {
+    margin-left: 22px;
+  }
+  /* Paired checkbox + color picker row for per-ratio guide colors. */
+  .guide-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .guide-row.indent {
+    margin-left: 22px;
+  }
+  .guide-row input[type="color"] {
+    width: 28px;
+    height: 22px;
+    padding: 0;
+    border: 1px solid var(--c-border);
+    border-radius: 4px;
+    cursor: pointer;
+  }
 
   @keyframes save-pulse-ring {
     0%   { box-shadow: 0 0 0 0 var(--c-primary-ring); }

@@ -31,6 +31,16 @@ pub fn ffmpeg_managed_path() -> Result<PathBuf> {
     Ok(local_data_dir()?.join("ffmpeg").join("bin").join("ffmpeg.exe"))
 }
 
+/// Scratch directory for encode intermediates — palette PNGs, concat
+/// lists, anything we don't want living next to the user's source files.
+/// Source folders on OneDrive/Dropbox/network shares are read-only or
+/// racy on write; keeping temps under LOCALAPPDATA sidesteps that.
+pub fn tmp_dir() -> Result<PathBuf> {
+    let p = local_data_dir()?.join("tmp");
+    std::fs::create_dir_all(&p).ok();
+    Ok(p)
+}
+
 #[allow(dead_code)]
 pub fn icons_dir() -> Result<PathBuf> {
     let p = data_dir()?.join("icons");
