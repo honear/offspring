@@ -315,16 +315,37 @@
 
   function onDragStart(e: DragEvent, p: Preset) {
     dragId = p.id;
-    // Required for Firefox; the payload itself is unused since we key off
-    // `dragId` in component state.
+    // Firefox won't start a drag without data on the transfer. The payload
+    // itself is unused — we key off `dragId` in component state, which
+    // survives the serialization restrictions dataTransfer imposes during
+    // the drag (only type strings are readable until drop).
     e.dataTransfer?.setData("text/plain", p.id);
     if (e.dataTransfer) e.dataTransfer.effectAllowed = "move";
   }
 
+  // WebView2 requires preventDefault on BOTH dragenter AND dragover for the
+  // element to register as a valid drop target. Skipping dragenter leaves
+  // the cursor stuck in the "forbidden" state even while over a child row.
+  function onDragEnter(e: DragEvent) {
+    if (!dragId) return;
+    e.preventDefault();
+  }
+
   function onDragOver(e: DragEvent, p: Preset) {
-    if (!dragId || dragId === p.id) return;
+    if (!dragId) return;
+    // Always preventDefault while a drag is active — including over the
+    // source row — so the browser shows the "move" cursor instead of
+    // "forbidden". Dropping on the source is a no-op (handled in onDrop)
+    // but the user shouldn't be punished with a scary cursor for moving
+    // over their own row on the way somewhere else.
     e.preventDefault();
     if (e.dataTransfer) e.dataTransfer.dropEffect = "move";
+    if (dragId === p.id) {
+      // Clear any prior indicator so we don't draw a drop line on the
+      // source row itself.
+      if (dragOver) dragOver = null;
+      return;
+    }
     // Above / below split at the row's vertical midpoint so the insertion
     // point feels natural as the cursor moves past an item.
     const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
@@ -332,10 +353,6 @@
     if (!dragOver || dragOver.id !== p.id || dragOver.pos !== pos) {
       dragOver = { id: p.id, pos };
     }
-  }
-
-  function onDragLeaveList() {
-    dragOver = null;
   }
 
   function onDrop(e: DragEvent, target: Preset) {
@@ -517,7 +534,7 @@
           <span class="tiny">PRESETS</span>
           <button class="ghost" onclick={addPreset} title="Add preset">+ Add</button>
         </div>
-        <ul class="preset-list" ondragleave={onDragLeaveList}>
+        <ul class="preset-list">
           {#each presets as p (p.id)}
             <li
               class="row-item"
@@ -527,6 +544,7 @@
               class:drop-below={dragOver?.id === p.id && dragOver?.pos === "below"}
               draggable="true"
               ondragstart={(e) => onDragStart(e, p)}
+              ondragenter={onDragEnter}
               ondragover={(e) => onDragOver(e, p)}
               ondrop={(e) => onDrop(e, p)}
               ondragend={onDragEnd}
