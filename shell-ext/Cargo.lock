@@ -69,7 +69,7 @@ checksum = "f8ca58f447f06ed17d5fc4043ce1b10dd205e060fb3ce5b979b8ed8e59ff3f79"
 
 [[package]]
 name = "offspring-shell-ext"
-version = "0.3.35"
+version = "0.3.36"
 dependencies = [
  "dirs",
  "serde",

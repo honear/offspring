@@ -704,7 +704,7 @@
   <header class="topbar">
     <div class="brand">
       <h1>Offspring</h1>
-      <span class="tiny">Right-click convert tools · Powered by FFmpeg · Developed by Second March</span>
+      <span class="tiny">Right-click convert tools powered by FFmpeg <br> Developed by Second March</span>
     </div>
 
     <nav class="tabs">
@@ -815,7 +815,9 @@
         {#if selectedToolId === "sequence"}
           <div class="editor-head">
             <h2 class="tool-title">Sequence</h2>
+
           </div>
+          <br>
           <video class="tool-video" src="/examples/sequence_low.mp4" autoplay muted loop playsinline></video>
           <p class="muted">
 
@@ -906,6 +908,7 @@
           <div class="editor-head">
             <h2 class="tool-title">Merge</h2>
           </div>
+          <br>
           <video class="tool-video" src="/examples/merge_low.mp4" autoplay muted loop playsinline></video>
           <br>
           <p class="muted">
@@ -926,6 +929,7 @@
           <div class="editor-head">
             <h2 class="tool-title">Greyscale</h2>
           </div>
+          <br>
           <video class="tool-video" src="/examples/greyscale_low.mp4" autoplay muted loop playsinline></video>
           <br>
           <p class="muted">
@@ -946,6 +950,7 @@
           <div class="editor-head">
             <h2 class="tool-title">Compare</h2>
           </div>
+          <br>
           <video class="tool-video" src="/examples/compare_low.mp4" autoplay muted loop playsinline></video>
           <br>
           <p class="muted">
@@ -963,6 +968,7 @@
           <div class="editor-head">
             <h2 class="tool-title">Overlay</h2>
           </div>
+          <br>
           <video class="tool-video" src="/examples/overlay_low.mp4" autoplay muted loop playsinline></video>
           <br>
           <p class="muted">
