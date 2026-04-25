@@ -132,11 +132,20 @@ try {
         throw "Expected installer at $installer but it wasn't produced"
     }
 
+    # Also produce an unversioned copy. We attach BOTH to each gh release
+    # so the marketing site can use the GitHub "latest/download" pattern
+    # for a forever-link without juggling a moving filename:
+    #   https://github.com/honear/offspring/releases/latest/download/Offspring-Setup.exe
+    # Updating in place each release means the URL never breaks.
+    $installerLatest = Join-Path $repoRoot "installer\dist\Offspring-Setup.exe"
+    Copy-Item $installer $installerLatest -Force
+
     Write-Host ""
     Write-Host "============================================================" -ForegroundColor Green
     Write-Host " Build OK" -ForegroundColor Green
     Write-Host "============================================================" -ForegroundColor Green
     Write-Host "  Installer: $installer" -ForegroundColor Green
+    Write-Host "  Latest:    $installerLatest" -ForegroundColor Green
     $size = (Get-Item $installer).Length / 1MB
     Write-Host ("  Size:      {0:N2} MB" -f $size) -ForegroundColor Green
     Write-Host ""

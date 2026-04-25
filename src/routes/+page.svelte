@@ -20,6 +20,17 @@
   // Right-click menu for preset rows. Non-null when visible.
   let ctxMenu = $state<{ x: number; y: number; preset: Preset } | null>(null);
 
+  // Themed confirmation dialog. We don't use the browser's `confirm()`
+  // because in WebView2 it pops the system OS dialog, which breaks the
+  // app's visual language and is jarring inside a Tauri shell. The
+  // modal below renders inline and inherits our tokens.
+  let confirmDialog = $state<{
+    title: string;
+    message: string;
+    confirmLabel: string;
+    onConfirm: () => void | Promise<void>;
+  } | null>(null);
+
   // Drag-and-drop reorder state. `dragId` is the preset being dragged;
   // `dragOver` is the row the cursor is currently over with a position
   // indicator telling us whether to drop above or below it. The drop-line
@@ -536,11 +547,18 @@
     ffmpeg = await api.ffmpegStatus();
   }
 
-  async function resetDefaults() {
-    if (!confirm("Reset all presets to defaults? Your customizations will be lost.")) return;
-    presets = await api.resetPresetsToDefaults();
-    selectedId = presets[0]?.id ?? null;
-    dirty = false;
+  function resetDefaults() {
+    confirmDialog = {
+      title: "Reset to defaults?",
+      message:
+        "All presets will be replaced with the built-in defaults. Your custom presets and edits will be permanently lost. This can't be undone.",
+      confirmLabel: "Reset presets",
+      onConfirm: async () => {
+        presets = await api.resetPresetsToDefaults();
+        selectedId = presets[0]?.id ?? null;
+        dirty = false;
+      },
+    };
   }
 
   // Track edits to mark dirty
@@ -569,7 +587,12 @@
   });
 </script>
 
-<svelte:window onclick={() => (ctxMenu = null)} />
+<svelte:window
+  onclick={() => (ctxMenu = null)}
+  onkeydown={(e) => {
+    if (e.key === "Escape" && confirmDialog) confirmDialog = null;
+  }}
+/>
 
 {#if ctxMenu}
   <div
@@ -589,6 +612,44 @@
       class="danger"
       onclick={() => { deletePreset(ctxMenu!.preset); ctxMenu = null; }}
     >Delete</button>
+  </div>
+{/if}
+
+<!-- Themed confirmation modal. Backdrop click and Escape both cancel.
+     Using `<dialog>` would be cleaner but requires `.showModal()` plumbing
+     and steals focus globally — a custom overlay gives us simpler
+     control over the close-on-backdrop and Escape behavior. -->
+{#if confirmDialog}
+  <div
+    class="modal-backdrop"
+    role="presentation"
+    onclick={() => (confirmDialog = null)}
+  >
+    <div
+      class="modal"
+      role="alertdialog"
+      aria-labelledby="confirm-title"
+      aria-describedby="confirm-message"
+      onclick={(e) => e.stopPropagation()}
+    >
+      <h3 id="confirm-title" class="modal-title">{confirmDialog.title}</h3>
+      <p id="confirm-message" class="modal-message">{confirmDialog.message}</p>
+      <div class="modal-actions">
+        <button class="ghost" onclick={() => (confirmDialog = null)}>
+          Cancel
+        </button>
+        <button
+          class="primary danger"
+          onclick={async () => {
+            const fn = confirmDialog!.onConfirm;
+            confirmDialog = null;
+            await fn();
+          }}
+        >
+          {confirmDialog.confirmLabel}
+        </button>
+      </div>
+    </div>
   </div>
 {/if}
 
@@ -643,11 +704,11 @@
   <header class="topbar">
     <div class="brand">
       <h1>Offspring</h1>
-      <span class="tiny">Right-click convert · powered by FFmpeg</span>
+      <span class="tiny">Right-click convert tools · Powered by FFmpeg · Developed by Second March</span>
     </div>
 
     <nav class="tabs">
-      <button class={tab === "presets" ? "tab active" : "tab"} onclick={() => (tab = "presets")}>Presets</button>
+      <button class={tab === "presets" ? "tab active" : "tab"} onclick={() => (tab = "presets")}>Main</button>
       <button class={tab === "settings" ? "tab active" : "tab"} onclick={() => (tab = "settings")}>Settings</button>
     </nav>
 
@@ -670,6 +731,36 @@
     <section class="panes">
       <aside class="sidebar">
         <div class="sidebar-head">
+          <span class="tiny">TOOLS</span>
+        </div>
+        <ul class="tool-list">
+          {#each TOOLS as t (t.id)}
+            <li
+              class="row-item tool-row"
+              class:active={selectedToolId === t.id}
+              onclick={() => { selectedToolId = t.id; selectedId = null; }}
+              onkeydown={(e) => e.key === "Enter" && ((selectedToolId = t.id), (selectedId = null))}
+              role="button"
+              tabindex="0"
+            >
+              <input
+                type="checkbox"
+                checked={settings.tools?.[t.id]?.enabled ?? (t.id === "overlay" ? false : true)}
+                onclick={(e) => e.stopPropagation()}
+                onchange={(e) => {
+                  ensureTools();
+                  const v = (e.currentTarget as HTMLInputElement).checked;
+                  settings.tools![t.id].enabled = v;
+                  saveSettings();
+                }}
+                title="Enable tool"
+              />
+              <span class="tool-name">{t.name}</span>
+            </li>
+          {/each}
+        </ul>
+
+        <div class="sidebar-head tools-head">
           <span class="tiny">PRESETS</span>
           <button class="ghost" onclick={addPreset} title="Add preset">+ Add</button>
         </div>
@@ -715,36 +806,6 @@
           {/each}
         </ul>
 
-        <div class="sidebar-head tools-head">
-          <span class="tiny">TOOLS</span>
-        </div>
-        <ul class="tool-list">
-          {#each TOOLS as t (t.id)}
-            <li
-              class="row-item tool-row"
-              class:active={selectedToolId === t.id}
-              onclick={() => { selectedToolId = t.id; selectedId = null; }}
-              onkeydown={(e) => e.key === "Enter" && ((selectedToolId = t.id), (selectedId = null))}
-              role="button"
-              tabindex="0"
-            >
-              <input
-                type="checkbox"
-                checked={settings.tools?.[t.id]?.enabled ?? (t.id === "overlay" ? false : true)}
-                onclick={(e) => e.stopPropagation()}
-                onchange={(e) => {
-                  ensureTools();
-                  const v = (e.currentTarget as HTMLInputElement).checked;
-                  settings.tools![t.id].enabled = v;
-                  saveSettings();
-                }}
-                title="Enable tool"
-              />
-              <span class="tool-name">{t.name}</span>
-            </li>
-          {/each}
-        </ul>
-
         <div class="sidebar-foot">
           <button class="ghost" onclick={resetDefaults}>Reset to defaults</button>
         </div>
@@ -755,18 +816,21 @@
           <div class="editor-head">
             <h2 class="tool-title">Sequence</h2>
           </div>
+          <video class="tool-video" src="/examples/sequence_low.mp4" autoplay muted loop playsinline></video>
           <p class="muted">
+
+            <br>
             When you right-click a numbered image (e.g. <code>render_0001.png</code>),
-            Offspring auto-expands the selection to include every matching frame
-            in the same folder and feeds them through ffmpeg's image sequence
-            demuxer. Use the preset's FPS to control playback speed.
+            Offspring will auto-detect the image sequence and process it. If checked, this means you can just right click on one of the images in the sequence, and click on a preset. The output will take into account the whole sequence. If the preset specifies the FPS, it will use that FPS for the output. If the preset does not specify the FPS, it will use the FPS specified here.
           </p>
+          <br>
           <p class="muted tiny">
             Frames must share the same filename stem, extension, and digit
             width. <code>render_0001.png</code> / <code>render_0002.png</code>
             match; <code>render_v01.png</code> / <code>render_v02.png</code>
             don't (too few digits by default).
           </p>
+          <br>
 
           <div class="fields tool-fields">
             <label class="inline">
@@ -783,7 +847,7 @@
             </label>
 
             <label class="field">
-              <span>Minimum digits</span>
+              <span>Minimum number padding digits (Eg. File_0001.png has 4 padding digits).</span>
               <input
                 type="number"
                 min="1"
@@ -800,7 +864,8 @@
               />
               <span class="muted tiny">
                 Files ending in fewer zero-padded digits than this are treated
-                as standalone images, not sequences. Default 4 matches the VFX
+                as standalone images, not sequences. 
+                <br> Default 4 matches the VFX
                 convention (<code>_0001</code>) and filters out version tags
                 like <code>v01</code>.
               </span>
@@ -841,28 +906,35 @@
           <div class="editor-head">
             <h2 class="tool-title">Merge</h2>
           </div>
+          <video class="tool-video" src="/examples/merge_low.mp4" autoplay muted loop playsinline></video>
+          <br>
           <p class="muted">
-            Concatenate multiple videos or GIFs into a single file. Offspring
+            Merge / Concatenate multiple videos or GIFs into a single file. Offspring
             detects the output format and settings (dimensions, framerate)
             from the first selected file, then re-encodes the rest to match.
-            Files are merged in filename order.
+            Files are merged in filename order and appended after each other.
           </p>
+          <br>
           <p class="muted tiny">
             Appears as a single <strong>Merge</strong> entry in the right-click
             menu (and as <code>Offspring Merge</code> in Send to) when two or
-            more files are selected. Single-file right-clicks never show it.
+            more files are selected. <br>
             Enable/disable from the Tools sidebar on the left.
           </p>
+          <br>
         {:else if selectedToolId === "grayscale"}
           <div class="editor-head">
             <h2 class="tool-title">Greyscale</h2>
           </div>
+          <video class="tool-video" src="/examples/greyscale_low.mp4" autoplay muted loop playsinline></video>
+          <br>
           <p class="muted">
             One-click greyscale copy of any video or GIF. Each selected file
             is re-encoded to a desaturated version alongside the original,
-            inheriting its format, dimensions, and framerate. Output filename
+            inheriting its format, dimensions, and framerate. <br> <br> This is useful if you want to share a "greyscale" animatic on dailies focusing solely on movement and timing, and not so much on colors or lighting. <br> Output filename
             is <code>&lt;name&gt;_gray.&lt;ext&gt;</code>.
           </p>
+          <br>
           <p class="muted tiny">
             Appears as a standalone <strong>Greyscale</strong> entry in the
             right-click menu (and as <code>Offspring Greyscale</code> in
@@ -874,12 +946,15 @@
           <div class="editor-head">
             <h2 class="tool-title">Compare</h2>
           </div>
+          <video class="tool-video" src="/examples/compare_low.mp4" autoplay muted loop playsinline></video>
+          <br>
           <p class="muted">
             Stack two or more selected videos side-by-side for A/B review.
             Each input is scaled to the first file's height and re-timed
             to a shared framerate. Output is
             <code>&lt;first-name&gt;_compare.&lt;ext&gt;</code>.
           </p>
+          <br>
           <p class="muted tiny">
             On by default. The entry is hidden unless at least two files
             are selected. Enable/disable from the Tools sidebar on the left.
@@ -888,16 +963,19 @@
           <div class="editor-head">
             <h2 class="tool-title">Overlay</h2>
           </div>
+          <video class="tool-video" src="/examples/overlay_low.mp4" autoplay muted loop playsinline></video>
+          <br>
           <p class="muted">
             Draw aspect-ratio guide boxes and/or burn filename, timecode,
             or custom text into each corner. Output is
             <code>&lt;name&gt;_overlay.&lt;ext&gt;</code>.
           </p>
+          <br>
           <p class="muted tiny">
             Off by default — enable from the Tools sidebar on the left to
             show an <strong>Overlay</strong> entry in the right-click menu.
           </p>
-
+          <br>
           <div class="fields tool-fields">
             <label class="inline">
               <input
@@ -1233,11 +1311,12 @@
 
       <div class="card">
         <h3>Right-click menu</h3>
-        <p class="muted tiny">
+        <p class="muted tiny"><br>
           By default, Offspring lives under Windows 11's "Show more options" (the classic right-click menu).
           Enabling the modern menu below moves it to the top-level right-click menu — it won't also appear
-          under "Show more options", so you don't end up with two entries. You might have to restart Explorer.
+          under "Show more options", so you don't end up with two entries. You might have to restart Windows Explorer.
         </p>
+        <br>
         <div style="margin-top: 12px; display: flex; flex-direction: column; gap: 10px;">
           <label class="inline">
             <input
@@ -1276,7 +1355,7 @@
                 }
               }}
             />
-            <span>Integrate with the <strong>Windows 11 modern right-click menu</strong> (top-level, no extra click)</span>
+            <span>Integrate with the <strong>Windows 11 right-click menu</strong></span>
           </label>
         </div>
       </div>
@@ -1490,6 +1569,66 @@
   .ctx-menu button:hover { background: var(--c-surface-2); }
   .ctx-menu button.danger { color: var(--c-danger, #b91c1c); }
   .ctx-menu button.danger:hover { background: var(--c-danger-tint, rgba(185, 28, 28, 0.12)); }
+
+  /* Confirmation modal — full-screen scrim with a centered card. The
+     scrim catches outside clicks (handled in markup) and dims the app
+     so the user's eye lands on the card. z-index sits above the
+     ctx-menu so a stacked confirmation always wins. */
+  .modal-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 2000;
+    background: rgba(0, 0, 0, 0.42);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 24px;
+    animation: modal-fade 120ms ease-out;
+  }
+  .modal {
+    background: var(--c-surface);
+    color: var(--c-text);
+    border: 1px solid var(--c-border);
+    border-radius: var(--r-md, 8px);
+    box-shadow: 0 16px 40px rgba(0, 0, 0, 0.28);
+    padding: 22px 22px 18px;
+    max-width: 420px;
+    width: 100%;
+    animation: modal-pop 140ms cubic-bezier(0.2, 0.9, 0.3, 1.2);
+  }
+  .modal-title {
+    margin: 0 0 8px;
+    font-size: var(--fs-18, 18px);
+    font-weight: 500;
+  }
+  .modal-message {
+    margin: 0 0 18px;
+    color: var(--c-text-2);
+    font-size: var(--fs-14, 14px);
+    line-height: 1.5;
+  }
+  .modal-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+  }
+  .modal-actions button.danger {
+    background: var(--c-danger, #b91c1c);
+    border-color: var(--c-danger, #b91c1c);
+    color: #fff;
+  }
+  .modal-actions button.danger:hover {
+    background: var(--c-danger-hover, #991414);
+    border-color: var(--c-danger-hover, #991414);
+  }
+  @keyframes modal-fade {
+    from { opacity: 0; }
+    to   { opacity: 1; }
+  }
+  @keyframes modal-pop {
+    from { opacity: 0; transform: translateY(6px) scale(0.98); }
+    to   { opacity: 1; transform: translateY(0) scale(1); }
+  }
   .row-item:hover { background: var(--c-surface); }
   .row-item.active {
     background: var(--c-surface);
@@ -1562,6 +1701,88 @@
     margin: 0;
     font-size: var(--fs-18, 18px);
     font-weight: 600;
+  }
+  /* Illustrative loop for each tool's editor pane. Capped width so it
+     doesn't dominate the layout on wide windows; auto height keeps the
+     source aspect ratio. Muted + loop + autoplay + playsinline is the
+     "silent ambient demo" combo every browser allows without a gesture. */
+  .tool-video {
+    display: block;
+    width: 100%;
+    max-width: 480px;
+    height: auto;
+    /* `auto` left/right margins center the (block-level) video inside
+       its block parent — `.editor` isn't a flex container, so
+       `align-self` had no effect here. */
+    margin: 12px auto 8px;
+    border-radius: 4px;
+    background: #000;
+    box-shadow: 0 1px 10px rgba(0, 0, 0, 0.25);
+  }
+  /* Custom slider so the thumb's center can actually reach 0% and 100%.
+     The native Chromium thumb is clamped inside the track's bounding
+     box, which leaves visible "untraveled" track to the right of the
+     thumb at max. We restyle from scratch: a flat track + a round thumb
+     positioned by the browser at the value's percentage. The thumb's
+     own width of 16px sits ON the track ends rather than being pushed
+     in by half its width, so 0/100 feel correct. `appearance: none` is
+     required for the ::-webkit/::-moz pseudo-elements to take effect. */
+  input[type="range"] {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 100%;
+    height: 18px;          /* hit-target — track is centered inside */
+    background: transparent;
+    cursor: pointer;
+    margin: 0;
+  }
+  input[type="range"]::-webkit-slider-runnable-track {
+    height: 4px;
+    border-radius: 2px;
+    background: var(--c-border-strong, rgba(17, 17, 17, 0.14));
+  }
+  input[type="range"]::-moz-range-track {
+    height: 4px;
+    border-radius: 2px;
+    background: var(--c-border-strong, rgba(17, 17, 17, 0.14));
+  }
+  input[type="range"]::-moz-range-progress {
+    height: 4px;
+    border-radius: 2px;
+    background: var(--c-primary, #2196F3);
+  }
+  input[type="range"]::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    background: var(--c-primary, #2196F3);
+    border: 2px solid var(--c-surface, #fff);
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.2);
+    /* Pull the thumb up so it's centered on the 4px track. */
+    margin-top: -6px;
+    transition: transform 0.1s ease;
+  }
+  input[type="range"]::-webkit-slider-thumb:hover {
+    transform: scale(1.1);
+  }
+  input[type="range"]::-moz-range-thumb {
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    background: var(--c-primary, #2196F3);
+    border: 2px solid var(--c-surface, #fff);
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.2);
+  }
+  input[type="range"]:focus-visible {
+    outline: none;
+  }
+  input[type="range"]:focus-visible::-webkit-slider-thumb {
+    box-shadow: var(--shadow-focus, 0 0 0 3px rgba(33, 150, 243, 0.24));
+  }
+  input[type="range"]:focus-visible::-moz-range-thumb {
+    box-shadow: var(--shadow-focus, 0 0 0 3px rgba(33, 150, 243, 0.24));
   }
   .tool-fields {
     margin-top: 14px;

@@ -2474,7 +2474,7 @@ dependencies = [
 
 [[package]]
 name = "offspring"
-version = "0.3.34"
+version = "0.3.35"
 dependencies = [
  "anyhow",
  "clap",
