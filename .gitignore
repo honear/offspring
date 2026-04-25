@@ -18,15 +18,11 @@ vite.config.ts.timestamp-*
 /installer/msix/stage/
 /installer/msix/.cert/
 
-# Defensive: never commit signing keys or local debug logs anywhere
 *.pfx
 *.p12
 *.key
 *.log
 
-# Internal-only docs and editor/agent configs not for public consumption
 /DESIGN.md
 /.claude/
-# Top-level examples/ is a working copy of the demo videos.
-# The runtime serves them from static/examples/ — keep that, not this.
 /examples/
