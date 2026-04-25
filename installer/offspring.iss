@@ -58,7 +58,6 @@ Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription:
 
 [Files]
 Source: "{#BinDir}\{#AppExeName}"; DestDir: "{app}"; Flags: ignoreversion
-Source: "..\DESIGN.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "scripts\download_ffmpeg.ps1"; DestDir: "{app}\scripts"; Flags: ignoreversion
 Source: "scripts\trust_cert.ps1"; DestDir: "{app}\scripts"; Flags: ignoreversion
 ; Shell-ext DLL + signed sparse MSIX + public cert, consumed by the
