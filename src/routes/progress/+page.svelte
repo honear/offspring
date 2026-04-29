@@ -158,12 +158,25 @@
       await api.onFinished((total) => finish(total));
 
       // Resolve pending preset + files and kick off.
-      // Two modes:
+      // Modes:
       //   - Preset (SendTo): pending preset_id is set; look it up in list.
       //   - Custom:           pending custom_preset holds the full preset.
+      //   - Trim:             URL has ?mode=trim&start=N&end=M (the Trim
+      //                       dialog navigates here in-place after writing
+      //                       trim_last.json + stashing files).
       phase = "resolving preset";
       let files: string[] = [];
       let preset: Preset | undefined;
+      const search = new URLSearchParams(window.location.search);
+      const isTrim = search.get("mode") === "trim";
+      const trimStart = Math.max(0, parseInt(search.get("start") ?? "0", 10) || 0);
+      const trimEnd = Math.max(0, parseInt(search.get("end") ?? "0", 10) || 0);
+      // Optional middle-range cut. Both `from` and `to` must be present
+      // for the cut to take effect; missing or partial → no cut.
+      const fromParam = search.get("from");
+      const toParam = search.get("to");
+      const trimRemoveFrom = fromParam != null ? Math.max(0, parseInt(fromParam, 10) || 0) : null;
+      const trimRemoveTo = toParam != null ? Math.max(0, parseInt(toParam, 10) || 0) : null;
       const [f, presetId, customPreset, allPresets, mergeFlag, grayscaleFlag, compareFlag, overlayFlag] = await Promise.all([
         api.getPendingFiles(),
         api.getPendingPresetId(),
@@ -193,7 +206,7 @@
       }
       // Tool paths derive their own settings from the inputs, so they
       // don't need a resolved preset.
-      const isTool = isMerge || isGrayscale || isCompare || isOverlay;
+      const isTool = isMerge || isGrayscale || isCompare || isOverlay || isTrim;
       if (!isTool && !preset) {
         errored = true;
         errorMsg = `No preset was resolved (presetId=${presetId ?? "null"}, customPreset=${customPreset ? "present" : "null"}). The shortcut may be stale.`;
@@ -213,18 +226,32 @@
         return;
       }
 
-      phase = isMerge
-        ? "starting merge"
-        : isGrayscale
-          ? "starting greyscale"
-          : isCompare
-            ? "starting compare"
-            : isOverlay
-              ? "starting overlay"
-              : "starting encode";
+      phase = isTrim
+        ? "starting trim"
+        : isMerge
+          ? "starting merge"
+          : isGrayscale
+            ? "starting greyscale"
+            : isCompare
+              ? "starting compare"
+              : isOverlay
+                ? "starting overlay"
+                : "starting encode";
       armStallTimer();
       didStart = true;
-      if (isMerge) {
+      if (isTrim) {
+        // A trim job is valid if it strips ANY frames OR cuts a middle
+        // range. Both being absent means the user invoked the route
+        // directly without filling out the dialog.
+        const hasMiddle = trimRemoveFrom != null && trimRemoveTo != null && trimRemoveTo >= trimRemoveFrom;
+        if (trimStart === 0 && trimEnd === 0 && !hasMiddle) {
+          errored = true;
+          errorMsg = "Trim was started without any frames to remove. Open the Trim dialog and enter values.";
+          finish(0);
+          return;
+        }
+        await api.encodeTrim(files, trimStart, trimEnd, trimRemoveFrom, trimRemoveTo);
+      } else if (isMerge) {
         // Merge derives its own settings from the first file — no
         // preset is sent through the wire.
         await api.encodeMerge(files);
@@ -237,15 +264,17 @@
       } else {
         await api.encode(files, preset!);
       }
-      phase = isMerge
-        ? "merging"
-        : isGrayscale
-          ? "greyscaling"
-          : isCompare
-            ? "stacking"
-            : isOverlay
-              ? "overlaying"
-              : "encoding";
+      phase = isTrim
+        ? "trimming"
+        : isMerge
+          ? "merging"
+          : isGrayscale
+            ? "greyscaling"
+            : isCompare
+              ? "stacking"
+              : isOverlay
+                ? "overlaying"
+                : "encoding";
     } catch (err) {
       // Anything that throws — listen(), invoke() failure, serde rejection,
       // FFmpeg-not-found — lands here and surfaces to the user.

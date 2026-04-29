@@ -19,6 +19,7 @@ use crate::merge::MergeCommand;
 use crate::overlay::OverlayCommand;
 use crate::presets::{load_presets, read_exe_path};
 use crate::settings::SettingsCommand;
+use crate::trim::TrimCommand;
 use crate::util::cotaskmem_wstr;
 
 #[implement(IExplorerCommand)]
@@ -44,6 +45,7 @@ impl RootCommand {
         out.push(GrayscaleCommand::new().into());
         out.push(CompareCommand::new().into());
         out.push(OverlayCommand::new().into());
+        out.push(TrimCommand::new().into());
         out.push(SettingsCommand::new().into());
         out
     }

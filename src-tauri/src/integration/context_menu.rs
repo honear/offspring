@@ -149,6 +149,9 @@ pub fn sync(presets: &[Preset], settings: &Settings) -> Result<()> {
     if settings.tools.compare.enabled {
         write_nested_verb("83_compare", "Compare", None, "compare")?;
     }
+    if settings.tools.trim.enabled {
+        write_nested_verb("84_trim", "Trim...", None, "trim")?;
+    }
 
     // Trailing "Custom..." entry. 99_ keeps it at the bottom even if the
     // user somehow has 90+ presets (which would be unusual).

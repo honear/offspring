@@ -98,6 +98,16 @@ pub fn spawn_overlay(files: &[PathBuf]) {
     let _ = cmd.spawn();
 }
 
+pub fn spawn_trim(files: &[PathBuf]) {
+    let Some(exe) = read_exe_path() else { return };
+    let mut cmd = Command::new(&exe);
+    cmd.arg("trim");
+    for f in files {
+        cmd.arg(f);
+    }
+    let _ = cmd.spawn();
+}
+
 /// Launch the main Offspring UI (the Settings window). No file args —
 /// the CLI `settings` verb ignores any selection and always shows the
 /// configuration surface.

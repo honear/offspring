@@ -227,6 +227,8 @@ pub struct ToolsSettings {
     pub compare: CompareTool,
     #[serde(default = "OverlayTool::default")]
     pub overlay: OverlayTool,
+    #[serde(default = "TrimTool::default")]
+    pub trim: TrimTool,
 }
 
 impl Default for ToolsSettings {
@@ -237,6 +239,7 @@ impl Default for ToolsSettings {
             grayscale: GrayscaleTool::default(),
             compare: CompareTool::default(),
             overlay: OverlayTool::default(),
+            trim: TrimTool::default(),
         }
     }
 }
@@ -316,6 +319,48 @@ fn default_guides_4_5() -> bool { false }
 fn default_color_16_9() -> String { "0xe5484d".into() }
 fn default_color_9_16() -> String { "0x00c2d7".into() }
 fn default_color_4_5() -> String { "0xf5d90a".into() }
+
+/// Frame-accurate trim: strip N frames from the start and/or end of each
+/// input. Exposed as a "Trim..." entry that opens a mini dialog asking
+/// for two frame counts; per-file independent (each input gets the same
+/// pair of values applied to ITS own timeline). Output keeps the source
+/// format and inherits the same MP4/GIF baseline used by Greyscale and
+/// Merge (CRF 23 / medium for MP4, 128-color bayer for GIF) — frame
+/// boundaries forbid stream-copy, so we re-encode at a known-good
+/// quality. Suffix `_trimmed`. On by default.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct TrimTool {
+    pub enabled: bool,
+}
+
+impl Default for TrimTool {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
+}
+
+/// Last-used Trim dialog values, persisted to `trim_last.json` so the
+/// dialog reopens with the user's previous numbers instead of zeros.
+/// Mirrors the `custom_last.json` pattern.
+///
+/// `remove_from` / `remove_to` are an optional middle-range cut: when
+/// both are `Some` and `to >= from`, the encoder excises that frame
+/// range (inclusive both ends) from each input in addition to whatever
+/// `start_frames`/`end_frames` strip from the ends. They're `Option`
+/// rather than 0-as-disabled because frame 0 is a legitimate range
+/// boundary — we need a way to say "no middle cut" that isn't "the
+/// user picked frame 0 to frame 0".
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+pub struct TrimLast {
+    #[serde(default)]
+    pub start_frames: u32,
+    #[serde(default)]
+    pub end_frames: u32,
+    #[serde(default)]
+    pub remove_from: Option<u32>,
+    #[serde(default)]
+    pub remove_to: Option<u32>,
+}
 
 /// Side-by-side A/B compare: stack N selected files horizontally into
 /// one output. Heights are normalized to the first file so hstack
@@ -520,6 +565,23 @@ pub fn load_custom_last() -> Result<Preset> {
 pub fn save_custom_last(p: &Preset) -> Result<()> {
     let path = paths::custom_last_path()?;
     let json = serde_json::to_string_pretty(p)?;
+    std::fs::write(&path, json)?;
+    Ok(())
+}
+
+pub fn load_trim_last() -> Result<TrimLast> {
+    let path = paths::trim_last_path()?;
+    if !path.exists() {
+        return Ok(TrimLast::default());
+    }
+    let raw = std::fs::read_to_string(&path)?;
+    let t: TrimLast = serde_json::from_str(&raw).unwrap_or_default();
+    Ok(t)
+}
+
+pub fn save_trim_last(t: &TrimLast) -> Result<()> {
+    let path = paths::trim_last_path()?;
+    let json = serde_json::to_string_pretty(t)?;
     std::fs::write(&path, json)?;
     Ok(())
 }

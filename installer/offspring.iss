@@ -10,7 +10,8 @@
 ; Compile with the Inno Setup compiler (iscc.exe or the Inno Setup IDE).
 
 #define AppName      "Offspring"
-#define AppVersion   "0.3.36"
+#define AppVersion   "0.3.42"
+#define AppVersionMsix "0.3.42.0"
 #define AppPublisher "Second March"
 #define AppExeName   "offspring.exe"
 #define AppId        "{{D8E5C6BC-5F10-4B29-A8A9-7D4D1A3B9C22}"
@@ -30,6 +31,12 @@
 AppId={#AppId}
 AppName={#AppName}
 AppVersion={#AppVersion}
+; VersionInfoVersion has to be MAJOR.MINOR.BUILD.REVISION four-numeric
+; (Win32 file-version resource format). When AppVersion carries a
+; pre-release tag like "0.3.41-0007", the bumper writes the
+; four-numeric form into AppVersionMsix and we use that here so the
+; installer .exe still has a valid version resource.
+VersionInfoVersion={#AppVersionMsix}
 AppPublisher={#AppPublisher}
 DefaultDirName={autopf}\{#AppName}
 DefaultGroupName={#AppName}

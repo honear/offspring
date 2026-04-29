@@ -9,7 +9,7 @@
   let presets = $state<Preset[]>([]);
   let selectedId = $state<string | null>(null);
   let selectedToolId = $state<
-    "sequence" | "merge" | "grayscale" | "compare" | "overlay" | null
+    "sequence" | "merge" | "grayscale" | "compare" | "overlay" | "trim" | null
   >(null);
   let settings = $state<Settings>({});
   let ffmpeg = $state<FfmpegStatus>({ found: false, path: null });
@@ -110,6 +110,11 @@
       name: "Overlay",
       blurb: "Burn metadata or aspect-ratio guides into each frame",
     },
+    {
+      id: "trim" as const,
+      name: "Trim",
+      blurb: "Strip frames from the start and/or end of each file",
+    },
   ];
 
   /** Ensure `settings.tools` exists with full defaults — the Rust side
@@ -146,6 +151,7 @@
         merge: { enabled: true },
         grayscale: { enabled: true },
         compare: { enabled: true },
+        trim: { enabled: true },
         overlay: {
           enabled: false,
           top_left: "filename",
@@ -179,6 +185,7 @@
     if (!settings.tools.merge) settings.tools.merge = { enabled: true };
     if (!settings.tools.grayscale) settings.tools.grayscale = { enabled: true };
     if (!settings.tools.compare) settings.tools.compare = { enabled: true };
+    if (!settings.tools.trim) settings.tools.trim = { enabled: true };
     if (!settings.tools.overlay) {
       settings.tools.overlay = {
         enabled: false,
@@ -1228,6 +1235,38 @@
               </label>
             {/if}
           </div>
+        {:else if selectedToolId === "trim"}
+          <div class="editor-head">
+            <h2 class="tool-title">Trim</h2>
+          </div>
+          <br>
+          <p class="muted">
+            Frame-accurate trim. Strips a chosen number of frames from the
+            start and/or end of each selected file, and (optionally) cuts a
+            specific frame range out of the middle — joining the two surviving
+            spans into one continuous output. Output filename is
+            <code>&lt;name&gt;_trimmed.&lt;ext&gt;</code>.
+          </p>
+          <br>
+          <p class="muted">
+            Picking <strong>Trim…</strong> from the right-click menu opens a
+            small dialog with two side-by-side fields for the start/end strip
+            counts, plus an optional "Remove a specific frame range" toggle
+            for the middle cut. The same settings apply to each selected file
+            independently, so multi-select produces one trimmed output per
+            input. Audio (when present) is trimmed in sync at every cut so
+            video and sound stay aligned.
+          </p>
+          <br>
+          <p class="muted tiny">
+            Frame boundaries don't line up with MP4 keyframes, so the file
+            has to be re-encoded — but Trim is meant to feel seamless, so
+            quality is pushed to visually-lossless: CRF 17 / preset slow /
+            256k AAC for MP4, and 255-color sierra2_4a-dithered palette for
+            GIF. Use one of the size-tuned presets afterward if you need to
+            shrink the output. <br>
+            Enable/disable from the Tools sidebar on the left.
+          </p>
         {:else if selected}
           <div class="editor-head">
             <input

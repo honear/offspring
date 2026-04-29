@@ -40,6 +40,8 @@ pub struct ToolsSettings {
     pub compare: CompareTool,
     #[serde(default)]
     pub overlay: OverlayTool,
+    #[serde(default)]
+    pub trim: TrimTool,
 }
 
 #[derive(Deserialize, Clone, Debug)]
@@ -87,6 +89,17 @@ pub struct OverlayTool {
 impl Default for OverlayTool {
     fn default() -> Self {
         Self { enabled: false }
+    }
+}
+
+#[derive(Deserialize, Clone, Debug)]
+pub struct TrimTool {
+    pub enabled: bool,
+}
+
+impl Default for TrimTool {
+    fn default() -> Self {
+        Self { enabled: true }
     }
 }
 

@@ -57,6 +57,14 @@ pub enum Command {
         /// Input files.
         files: Vec<PathBuf>,
     },
+    /// Open the Trim mini-dialog pre-filled with the last-used frame
+    /// counts. The user enters how many frames to strip from the start
+    /// and end; the same window then navigates to /progress/ and runs
+    /// the per-file trim encode. Output is `<stem>_trimmed.<ext>`.
+    Trim {
+        /// Input files.
+        files: Vec<PathBuf>,
+    },
     /// Open the main Offspring settings window. Wired to a trailing
     /// "Offspring settings" entry in the right-click menu so users can
     /// reach the UI without launching the app from Start.

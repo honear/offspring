@@ -6,7 +6,7 @@ use crate::defaults;
 use crate::ffmpeg::{self, EncodeInput, ProgressEvent};
 use crate::integration;
 use crate::paths;
-use crate::presets::{self, GuidesConfig, OverlayConfig, Preset, Settings};
+use crate::presets::{self, GuidesConfig, OverlayConfig, Preset, Settings, TrimLast};
 use crate::sequence;
 
 #[derive(Serialize)]
@@ -79,6 +79,16 @@ pub fn get_custom_last() -> Result<Preset, String> {
 #[tauri::command]
 pub fn save_custom_last(preset: Preset) -> Result<(), String> {
     presets::save_custom_last(&preset).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn get_trim_last() -> Result<TrimLast, String> {
+    presets::load_trim_last().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn save_trim_last(trim: TrimLast) -> Result<(), String> {
+    presets::save_trim_last(&trim).map_err(|e| e.to_string())
 }
 
 /// Re-apply every shell integration (context menu, SendTo, modern menu)
@@ -615,6 +625,82 @@ pub fn encode_overlay(
     Ok(())
 }
 
+/// Trim tool: per-file frame-accurate trim. Strips `start_frames` from
+/// the front and `end_frames` from the back of each input, and
+/// optionally cuts the inclusive range `[remove_from, remove_to]` out
+/// of the middle. Writes `<stem>_trimmed.<ext>` next to each source.
+/// Format inherited per file; settings re-encoded at near-lossless
+/// baseline (CRF 17 / preset slow / 256k AAC for MP4, 255-color
+/// sierra2_4a-dithered palette for GIF). Audio, when present in MP4
+/// inputs, is trimmed in sync at frame-derived second boundaries.
+#[tauri::command]
+pub fn encode_trim(
+    app: tauri::AppHandle,
+    files: Vec<String>,
+    start_frames: u32,
+    end_frames: u32,
+    remove_from: Option<u32>,
+    remove_to: Option<u32>,
+) -> Result<(), String> {
+    if files.is_empty() {
+        return Err("Trim needs at least one file".into());
+    }
+    // Accept the middle range only when both endpoints are present and
+    // form a non-inverted span; the dialog should never send a partial
+    // range, but defaulting bad input to "no middle cut" is friendlier
+    // than erroring.
+    let remove_range: Option<(u32, u32)> = match (remove_from, remove_to) {
+        (Some(a), Some(b)) if b >= a => Some((a, b)),
+        _ => None,
+    };
+    if start_frames == 0 && end_frames == 0 && remove_range.is_none() {
+        return Err("Nothing to trim — set start/end frames or a middle range.".into());
+    }
+    let settings = presets::load_settings().unwrap_or_default();
+    let ffmpeg_path = ffmpeg::resolve_ffmpeg(&settings).map_err(|e| e.to_string())?;
+    let paths_in: Vec<std::path::PathBuf> =
+        files.iter().map(std::path::PathBuf::from).collect();
+    let total = paths_in.len();
+
+    std::thread::spawn(move || {
+        let app_cl = app.clone();
+        let result = ffmpeg::encode_trim_files(
+            &ffmpeg_path,
+            &paths_in,
+            start_frames,
+            end_frames,
+            remove_range,
+            &settings,
+            move |ev: ProgressEvent| {
+                let _ = app_cl.emit("encode-progress", ev);
+            },
+        );
+        if let Err(e) = result {
+            // Top-level failure (couldn't even start) — surface as a
+            // single error event keyed to the first file so the UI
+            // doesn't sit on "Preparing…" forever.
+            let first_display = paths_in
+                .first()
+                .map(|p| p.display().to_string())
+                .unwrap_or_default();
+            let _ = app.emit(
+                "encode-progress",
+                ProgressEvent {
+                    file_index: 1,
+                    total_files: total,
+                    input: first_display,
+                    stage: "error".into(),
+                    percent: None,
+                    message: Some(e.to_string()),
+                },
+            );
+        }
+        let _ = app.emit("encode-finished", total);
+    });
+
+    Ok(())
+}
+
 /// Compute a logical (x, y) that centers a `w × h` window on the cursor,
 /// clamped to the monitor the cursor is on. Returns `None` if cursor or
 /// monitor lookups fail — caller should then let Tauri choose (typically
@@ -683,6 +769,38 @@ pub fn open_custom_window(app: &tauri::AppHandle, files: Vec<String>) -> anyhow:
     Ok(())
 }
 
+/// Open the Trim mini dialog. Compact — just two number fields + the
+/// file list. The window itself navigates to /progress/ once the user
+/// clicks Trim, so we don't need a separate progress-window open here.
+///
+/// Focus dance at the end: when the shell-extension spawns offspring.exe
+/// from Explorer, Explorer keeps the foreground by default and the new
+/// dialog ends up behind it. Briefly toggling `always_on_top` bypasses
+/// Windows' focus-stealing prevention long enough for `set_focus` to
+/// actually move the foreground to us; we drop always-on-top right away
+/// so the user can later put another window over the dialog if they
+/// want to. Same trick the progress window uses (which keeps it on
+/// permanently — cosmetic difference, no behavioral one).
+pub fn open_trim_window(app: &tauri::AppHandle, files: Vec<String>) -> anyhow::Result<()> {
+    let (pw, ph) = (440.0, 420.0);
+    let mut b = WebviewWindowBuilder::new(app, "trim", WebviewUrl::App("trim/".into()))
+        .title("Offspring — Trim")
+        .inner_size(pw, ph)
+        .min_inner_size(380.0, 320.0)
+        .resizable(true)
+        .focused(true);
+    if let Some((x, y)) = position_near_cursor(app, pw, ph) {
+        b = b.position(x, y);
+    }
+    let w = b.build()?;
+    app.manage_pending_files(files);
+    let _ = w.unminimize();
+    let _ = w.set_always_on_top(true);
+    let _ = w.set_focus();
+    let _ = w.set_always_on_top(false);
+    Ok(())
+}
+
 pub fn open_main_window(app: &tauri::AppHandle) -> anyhow::Result<()> {
     let (pw, ph) = (880.0, 760.0);
     let mut b = WebviewWindowBuilder::new(app, "main", WebviewUrl::App("".into()))
@@ -719,6 +837,12 @@ pub struct PendingState {
     pub compare: std::sync::Mutex<bool>,
     /// True when the progress window should route to `encode_overlay`.
     pub overlay: std::sync::Mutex<bool>,
+    /// True when the user invoked `offspring trim <files>` and the
+    /// Trim mini-dialog should open. Distinct from a `trim` "is this
+    /// an active trim encode" flag — encoding is driven directly by
+    /// the dialog calling `encode_trim`, so we only need to remember
+    /// the dialog-routing decision in pending state.
+    pub trim_dialog: std::sync::Mutex<bool>,
 }
 
 pub trait AppHandleExt {
@@ -729,6 +853,7 @@ pub trait AppHandleExt {
     fn manage_pending_grayscale(&self, grayscale: bool);
     fn manage_pending_compare(&self, v: bool);
     fn manage_pending_overlay(&self, v: bool);
+    fn manage_pending_trim_dialog(&self, v: bool);
 }
 
 impl AppHandleExt for tauri::AppHandle {
@@ -767,6 +892,11 @@ impl AppHandleExt for tauri::AppHandle {
             *state.overlay.lock().unwrap() = v;
         }
     }
+    fn manage_pending_trim_dialog(&self, v: bool) {
+        if let Some(state) = self.try_state::<PendingState>() {
+            *state.trim_dialog.lock().unwrap() = v;
+        }
+    }
 }
 
 #[tauri::command]
@@ -787,6 +917,11 @@ pub fn get_pending_compare(state: tauri::State<'_, PendingState>) -> bool {
 #[tauri::command]
 pub fn get_pending_overlay(state: tauri::State<'_, PendingState>) -> bool {
     *state.overlay.lock().unwrap()
+}
+
+#[tauri::command]
+pub fn get_pending_trim_dialog(state: tauri::State<'_, PendingState>) -> bool {
+    *state.trim_dialog.lock().unwrap()
 }
 
 #[tauri::command]
@@ -818,5 +953,32 @@ pub fn prepare_custom_encode(
     app.manage_pending_files(files);
     app.manage_pending_preset(None);
     app.manage_pending_custom_preset(Some(preset));
+    Ok(())
+}
+
+/// Stash files in app state ahead of the Trim dialog navigating its own
+/// webview to /progress/. Persists the user's chosen frame counts plus
+/// the optional middle-cut range to `trim_last.json` so the dialog
+/// reopens with them next time. Mirrors `prepare_custom_encode`'s "no
+/// second window" approach to dodge the Windows WebView2
+/// blank-second-window bug.
+#[tauri::command]
+pub fn prepare_trim_encode(
+    app: tauri::AppHandle,
+    files: Vec<String>,
+    start_frames: u32,
+    end_frames: u32,
+    remove_from: Option<u32>,
+    remove_to: Option<u32>,
+) -> Result<(), String> {
+    app.manage_pending_files(files);
+    app.manage_pending_preset(None);
+    app.manage_pending_custom_preset(None);
+    let _ = presets::save_trim_last(&TrimLast {
+        start_frames,
+        end_frames,
+        remove_from,
+        remove_to,
+    });
     Ok(())
 }

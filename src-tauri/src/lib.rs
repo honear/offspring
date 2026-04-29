@@ -100,6 +100,7 @@ pub fn run() {
                         *state.compare.lock().unwrap() = false;
                         *state.grayscale.lock().unwrap() = false;
                         *state.overlay.lock().unwrap() = false;
+                        *state.trim_dialog.lock().unwrap() = false;
                     }
                 }
 
@@ -131,6 +132,8 @@ pub fn run() {
             commands::download_ffmpeg,
             commands::get_custom_last,
             commands::save_custom_last,
+            commands::get_trim_last,
+            commands::save_trim_last,
             commands::sync_integrations,
             commands::restart_explorer,
             commands::open_data_folder,
@@ -139,6 +142,7 @@ pub fn run() {
             commands::encode_grayscale,
             commands::encode_compare,
             commands::encode_overlay,
+            commands::encode_trim,
             commands::get_pending_files,
             commands::get_pending_preset_id,
             commands::get_pending_custom_preset,
@@ -146,7 +150,9 @@ pub fn run() {
             commands::get_pending_grayscale,
             commands::get_pending_compare,
             commands::get_pending_overlay,
+            commands::get_pending_trim_dialog,
             commands::prepare_custom_encode,
+            commands::prepare_trim_encode,
             updates::check_for_updates,
             updates::download_update,
             updates::install_update,
@@ -291,6 +297,16 @@ fn merge_pending(handle: &tauri::AppHandle, cmd: Option<Command>) {
             // no other tool flag. The Custom window reads `pending_files`
             // and the user picks the preset interactively.
         }
+        Command::Trim { files } => {
+            dlog!("merge_pending: Trim +files={}", files.len());
+            append_files(&state, files);
+            *state.trim_dialog.lock().unwrap() = true;
+            // Trim routes to its own mini window. The window reads the
+            // pending files + the saved trim_last numbers, asks the user
+            // to confirm/edit them, then navigates in-place to /progress/
+            // and calls encode_trim. No second window opens — same
+            // pattern Custom uses to dodge the WebView2 bug.
+        }
         Command::Settings | Command::FirstRun | Command::Cleanup => {
             // Settings opens the main window — falls out of
             // `open_window_for_pending` when no files are pending.
@@ -328,16 +344,18 @@ fn open_window_for_pending(handle: &tauri::AppHandle) {
     let compare = *state.compare.lock().unwrap();
     let grayscale = *state.grayscale.lock().unwrap();
     let overlay = *state.overlay.lock().unwrap();
+    let trim_dialog = *state.trim_dialog.lock().unwrap();
     let preset_id = state.preset_id.lock().unwrap().clone();
 
     dlog!(
-        "open_window_for_pending: files={}, preset={:?}, merge={}, compare={}, grayscale={}, overlay={}",
+        "open_window_for_pending: files={}, preset={:?}, merge={}, compare={}, grayscale={}, overlay={}, trim_dialog={}",
         files.len(),
         preset_id,
         merge,
         compare,
         grayscale,
-        overlay
+        overlay,
+        trim_dialog
     );
 
     if !has_files {
@@ -345,6 +363,19 @@ fn open_window_for_pending(handle: &tauri::AppHandle) {
         match commands::open_main_window(handle) {
             Ok(_) => dlog!("  open_main_window OK"),
             Err(e) => dlog!("  open_main_window FAILED: {:#}", e),
+        }
+        return;
+    }
+
+    // Trim: files present + trim_dialog flag → open the Trim mini
+    // dialog. Checked before Custom because trim_dialog is the more
+    // specific signal — Custom is the fallback for "files but no
+    // tool flag at all".
+    if trim_dialog {
+        dlog!("  → open_trim_window");
+        match commands::open_trim_window(handle, files) {
+            Ok(_) => dlog!("  open_trim_window OK"),
+            Err(e) => dlog!("  open_trim_window FAILED: {:#}", e),
         }
         return;
     }

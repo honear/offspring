@@ -23,6 +23,10 @@ pub fn custom_last_path() -> Result<PathBuf> {
     Ok(data_dir()?.join("custom_last.json"))
 }
 
+pub fn trim_last_path() -> Result<PathBuf> {
+    Ok(data_dir()?.join("trim_last.json"))
+}
+
 pub fn settings_path() -> Result<PathBuf> {
     Ok(data_dir()?.join("settings.json"))
 }

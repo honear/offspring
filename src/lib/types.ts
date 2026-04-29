@@ -56,6 +56,25 @@ export interface ToolsSettings {
   grayscale: GrayscaleTool;
   compare: CompareTool;
   overlay: OverlayTool;
+  trim: TrimTool;
+}
+
+/** Trim tool: per-file frame-accurate trim. UI surfaces a "Trim..."
+ *  entry in the right-click menu that opens a mini dialog asking for
+ *  start/end frame counts. Output is `<stem>_trimmed.<ext>`. */
+export interface TrimTool {
+  enabled: boolean;
+}
+
+/** Persisted last-used Trim dialog values so the dialog reopens with
+ *  the user's previous numbers instead of zeros. `remove_from`/
+ *  `remove_to` are the optional middle-range cut — both must be set and
+ *  in non-inverted order for the encoder to honour them. */
+export interface TrimLast {
+  start_frames: number;
+  end_frames: number;
+  remove_from?: number | null;
+  remove_to?: number | null;
 }
 
 export interface SequenceTool {

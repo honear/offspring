@@ -29,6 +29,7 @@ mod overlay;
 mod presets;
 mod root;
 mod settings;
+mod trim;
 mod util;
 
 /// Class ID exposed to Windows. Must match the value in the MSIX manifest

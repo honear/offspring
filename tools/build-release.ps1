@@ -2,6 +2,9 @@
 # to users, so you can test the exact binary before publishing.
 #
 # Steps (mirrors .github/workflows/release.yml):
+#   0. bump-version.ps1              -> updates package.json + Cargo.tomls
+#                                     + tauri.conf.json + offspring.iss
+#                                     to a new version
 #   1. npm run tauri build           -> src-tauri/target/release/offspring.exe
 #   2. cargo build --release in      -> shell-ext/target/release/offspring_shell_ext.dll
 #      shell-ext/
@@ -10,7 +13,20 @@
 #   4. build-msix.ps1                -> installer/msix/dist/OffspringShellExt.msix + .cer
 #   5. iscc.exe installer/offspring.iss -> installer/dist/Offspring-Setup-<ver>.exe
 #
-# Version is read from package.json unless you pass -Version.
+# Version handling:
+#   default            "0.3.41"       -> "0.3.41-b0001"    (local iteration)
+#                      "0.3.41-b0007" -> "0.3.41-b0008"    (counter bump)
+#   -Release           "0.3.41-b0007" -> "0.3.42"          (strip suffix, patch+1)
+#                      "0.3.41"       -> "0.3.42"          (patch+1)
+#   -Version X.Y.Z[-bNNNN]                                 (explicit override)
+#
+# Local iterations get a "-bNNNN" suffix so the installer filename, the
+# AppVersion in installed metadata, and every Cargo/npm crate version
+# stay traceable per build. The MSIX manifest gets a four-numeric form
+# automatically (-bNNNN -> .NNNN). The "b" prefix is required because
+# strict SemVer 2.0.0 forbids leading zeroes on numeric pre-release
+# identifiers; alphanumeric ones (like "b0001") are fine. Use -Release
+# when you're ready to publish a build to GitHub.
 #
 # Prerequisites (same as CI):
 #   Node 20+, Rust stable, Windows 10 SDK, Inno Setup 6 (iscc.exe on PATH
@@ -19,6 +35,7 @@
 [CmdletBinding()]
 param(
     [string]$Version,
+    [switch]$Release,       # bump patch and strip -NNNN suffix
     [switch]$SkipInstall,   # skip `npm ci` (faster on repeat builds)
     [switch]$OpenOutput     # open Explorer on installer/dist/ when done
 )
@@ -28,13 +45,35 @@ $repoRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
 
 Push-Location $repoRoot
 try {
-    if (-not $Version) {
-        $pkg = Get-Content (Join-Path $repoRoot "package.json") -Raw | ConvertFrom-Json
-        $Version = $pkg.version
+    # --- 0. version bump ------------------------------------------------
+    # Always run the bumper. Even an explicit -Version arg flows through
+    # it so all five files (package.json, both Cargo.tomls, tauri.conf,
+    # offspring.iss) plus package-lock.json end up in lockstep.
+    $bumper = Join-Path $repoRoot "tools\bump-version.ps1"
+    Write-Host ""
+    Write-Host "[0/5] bump-version..." -ForegroundColor Yellow
+    if ($Version) {
+        $Version = & $bumper -Set $Version
+    } elseif ($Release) {
+        $Version = & $bumper -Release
+    } else {
+        $Version = & $bumper
     }
+    if ($LASTEXITCODE -ne 0 -or -not $Version) { throw "bump-version.ps1 failed" }
+    # bump-version returns the new semver via stdout; the four-numeric
+    # MSIX form is what build-msix.ps1 wants. Derive it here from the
+    # new semver (same logic as inside the bumper, kept duplicated to
+    # avoid dot-sourcing across two scripts).
+    if (-not ($Version -match '^(\d+)\.(\d+)\.(\d+)(?:-b(\d+))?$')) {
+        throw "Bumper returned a version we can't parse: '$Version'"
+    }
+    $msixCounter = if ($Matches[4]) { [int]$Matches[4] } else { 0 }
+    $msixVersion = "$($Matches[1]).$($Matches[2]).$($Matches[3]).$msixCounter"
+
     Write-Host ""
     Write-Host "============================================================" -ForegroundColor Cyan
     Write-Host " Offspring local release build - $Version" -ForegroundColor Cyan
+    Write-Host "                          (msix: $msixVersion)" -ForegroundColor DarkCyan
     Write-Host "============================================================" -ForegroundColor Cyan
     Write-Host ""
 
@@ -98,9 +137,12 @@ try {
     }
 
     # --- 4. MSIX ---------------------------------------------------------
+    # MSIX manifest schema rejects pre-release tags ("0.3.41-0007"
+    # parses as bad). Pass the four-numeric form computed from the
+    # bumper output instead.
     Write-Host ""
-    Write-Host "[4/5] build-msix.ps1 (version $Version.0)..." -ForegroundColor Yellow
-    pwsh (Join-Path $repoRoot "installer\msix\build-msix.ps1") -Version "$Version.0"
+    Write-Host "[4/5] build-msix.ps1 (msix version $msixVersion)..." -ForegroundColor Yellow
+    pwsh (Join-Path $repoRoot "installer\msix\build-msix.ps1") -Version $msixVersion
     if ($LASTEXITCODE -ne 0) { throw "build-msix.ps1 failed" }
 
     # --- 5. Inno Setup ---------------------------------------------------
@@ -132,24 +174,36 @@ try {
         throw "Expected installer at $installer but it wasn't produced"
     }
 
-    # Also produce an unversioned copy. We attach BOTH to each gh release
-    # so the marketing site can use the GitHub "latest/download" pattern
-    # for a forever-link without juggling a moving filename:
+    # The unversioned "latest" copy is what gets attached to GitHub
+    # releases for the forever-link
     #   https://github.com/honear/offspring/releases/latest/download/Offspring-Setup.exe
-    # Updating in place each release means the URL never breaks.
+    # We only refresh it on -Release builds so local iteration builds
+    # ("0.3.41-0007") don't masquerade as the published "latest" — the
+    # marketing site link would otherwise serve a half-finished build.
+    $isRelease = $Version -notmatch '-b\d+$'
     $installerLatest = Join-Path $repoRoot "installer\dist\Offspring-Setup.exe"
-    Copy-Item $installer $installerLatest -Force
+    if ($isRelease) {
+        Copy-Item $installer $installerLatest -Force
+    }
 
     Write-Host ""
     Write-Host "============================================================" -ForegroundColor Green
     Write-Host " Build OK" -ForegroundColor Green
     Write-Host "============================================================" -ForegroundColor Green
     Write-Host "  Installer: $installer" -ForegroundColor Green
-    Write-Host "  Latest:    $installerLatest" -ForegroundColor Green
+    if ($isRelease) {
+        Write-Host "  Latest:    $installerLatest  (refreshed)" -ForegroundColor Green
+    } else {
+        Write-Host "  Latest:    (skipped — local iteration build)" -ForegroundColor DarkGray
+    }
     $size = (Get-Item $installer).Length / 1MB
     Write-Host ("  Size:      {0:N2} MB" -f $size) -ForegroundColor Green
     Write-Host ""
-    Write-Host "Install it locally to test, then say 'push' to publish." -ForegroundColor Cyan
+    if ($isRelease) {
+        Write-Host "Install it locally to test, then say 'push' to publish." -ForegroundColor Cyan
+    } else {
+        Write-Host "Local iteration build. Re-run with -Release to cut a publishable build." -ForegroundColor Cyan
+    }
 
     if ($OpenOutput) {
         Start-Process (Split-Path $installer -Parent)

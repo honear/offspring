@@ -1301,6 +1301,458 @@ pub fn derive_overlay_preset(ffmpeg: &Path, input: &Path, cfg: OverlayConfig) ->
     }
 }
 
+/// Total frame count for the first video stream of `input`. Used by the
+/// Trim tool to translate user-entered "strip N from end" into an
+/// absolute end_frame for the `trim` filter (filter wants an absolute
+/// upper bound, not a relative one).
+///
+/// First tries `nb_frames` from the metadata — that's instant and works
+/// for most MP4s. Falls back to `-count_packets nb_read_packets`, which
+/// decodes far enough to count, and is what makes this work reliably on
+/// GIFs and on MP4s whose `nb_frames` is missing or wrong (variable
+/// frame rate, certain Apple-encoded clips). Returns `None` if both
+/// attempts fail — caller should treat the trim as a no-op or error
+/// rather than silently producing a zero-length file.
+pub fn probe_total_frames(ffmpeg: &Path, input: &Path) -> Option<u64> {
+    let probe = ffmpeg.with_file_name("ffprobe.exe");
+    if !probe.exists() {
+        return None;
+    }
+
+    // Fast path: `nb_frames` from the stream header. Reliable on most
+    // CFR MP4s; comes back as "N/A" on GIFs and VFR clips.
+    let mut cmd = Command::new(&probe);
+    cmd.args([
+        "-v", "error",
+        "-select_streams", "v:0",
+        "-show_entries", "stream=nb_frames",
+        "-of", "default=nw=1:nk=1",
+    ])
+    .arg(input)
+    .stdin(Stdio::null())
+    .stderr(Stdio::null());
+    hide_console(&mut cmd);
+    if let Ok(out) = cmd.output() {
+        let s = String::from_utf8_lossy(&out.stdout);
+        let trimmed = s.trim();
+        if trimmed != "N/A" && !trimmed.is_empty() {
+            if let Ok(n) = trimmed.parse::<u64>() {
+                if n > 0 {
+                    return Some(n);
+                }
+            }
+        }
+    }
+
+    // Fallback: count packets. Slower (decodes/demuxes the whole stream)
+    // but works on GIFs and on MP4s missing `nb_frames`.
+    let mut cmd = Command::new(&probe);
+    cmd.args([
+        "-v", "error",
+        "-count_packets",
+        "-select_streams", "v:0",
+        "-show_entries", "stream=nb_read_packets",
+        "-of", "default=nw=1:nk=1",
+    ])
+    .arg(input)
+    .stdin(Stdio::null())
+    .stderr(Stdio::null());
+    hide_console(&mut cmd);
+    let out = cmd.output().ok()?;
+    let s = String::from_utf8_lossy(&out.stdout);
+    let n: u64 = s.trim().parse().ok()?;
+    if n > 0 {
+        Some(n)
+    } else {
+        None
+    }
+}
+
+/// Compute the half-open kept frame intervals `[start, end)` for one
+/// input given user-entered start/end strip counts and an optional
+/// middle-range cut. Returns an empty `Vec` when the requested settings
+/// would leave nothing.
+///
+/// Semantics:
+///   * `start_frames` / `end_frames` shrink the outer interval from
+///     `[0, total_frames)` down to `[start_frames, total_frames-end_frames)`.
+///   * `remove_range = Some((rm_from, rm_to))` is INCLUSIVE on both
+///     ends — `rm_from=50, rm_to=80` removes 31 frames (50…80). We
+///     translate to half-open `[rm_from, rm_to+1)` internally to make
+///     the interval algebra cleaner.
+///   * The cut is clipped to the outer interval, so passing a range
+///     entirely outside the kept region is a no-op (one interval out)
+///     and a partially-overlapping range trims one end of the result
+///     instead of producing a phantom hole.
+fn compute_kept_intervals(
+    total_frames: u64,
+    start_frames: u64,
+    end_frames: u64,
+    remove_range: Option<(u64, u64)>,
+) -> Vec<(u64, u64)> {
+    if start_frames + end_frames >= total_frames {
+        return Vec::new();
+    }
+    let outer_start = start_frames;
+    let outer_end = total_frames - end_frames; // exclusive
+    let Some((rm_from, rm_to)) = remove_range else {
+        return vec![(outer_start, outer_end)];
+    };
+    if rm_to < rm_from {
+        // User supplied an inverted range — treat as no cut rather than
+        // erroring, since the dialog can't always intercept it (paste,
+        // deferred validation).
+        return vec![(outer_start, outer_end)];
+    }
+    let rm_lo = rm_from.max(outer_start);
+    let rm_hi_excl = (rm_to + 1).min(outer_end);
+    if rm_lo >= outer_end || rm_hi_excl <= outer_start || rm_lo >= rm_hi_excl {
+        return vec![(outer_start, outer_end)];
+    }
+    let mut out = Vec::new();
+    if outer_start < rm_lo {
+        out.push((outer_start, rm_lo));
+    }
+    if rm_hi_excl < outer_end {
+        out.push((rm_hi_excl, outer_end));
+    }
+    out
+}
+
+/// Build a video filter chain that keeps only frames inside `intervals`
+/// and re-times them to start at PTS=0. For one interval we use
+/// `trim`+`setpts=PTS-STARTPTS` (low overhead, the standard idiom). For
+/// two or more we use `select` with an OR'd list of `between(n,A,B-1)`
+/// clauses, plus `setpts=N/FRAME_RATE/TB` to renumber the surviving
+/// frame timestamps from scratch (without this, the dropped-frame gaps
+/// stay in the timeline and downstream filters see jumps).
+///
+/// Comma-as-arg-separator inside ffmpeg filter expressions has to be
+/// escaped as `\,` — otherwise `between(n,5,10)` parses as three
+/// arguments to `select`. The escape in the `format!` template is
+/// `\\,`.
+fn build_video_chop_filter(intervals: &[(u64, u64)]) -> String {
+    if intervals.len() == 1 {
+        let (a, b) = intervals[0];
+        return format!("trim=start_frame={a}:end_frame={b},setpts=PTS-STARTPTS");
+    }
+    let exprs: Vec<String> = intervals
+        .iter()
+        .map(|(a, b)| format!("between(n\\,{}\\,{})", a, b - 1))
+        .collect();
+    format!("select='{}',setpts=N/FRAME_RATE/TB", exprs.join("+"))
+}
+
+/// Audio counterpart of [`build_video_chop_filter`]. Frame indices are
+/// translated to seconds via `frames / fps` so cuts line up with the
+/// video at the boundary frames. The `aselect`/`between(t,…)` form
+/// works on container timestamps; `asetpts=N/SR/TB` rewrites them to
+/// the kept span's local time.
+fn build_audio_chop_filter(intervals: &[(u64, u64)], fps: u32) -> String {
+    if intervals.len() == 1 {
+        let (a, b) = intervals[0];
+        let start_s = a as f64 / fps as f64;
+        let end_s = b as f64 / fps as f64;
+        return format!("atrim=start={start_s:.6}:end={end_s:.6},asetpts=PTS-STARTPTS");
+    }
+    let exprs: Vec<String> = intervals
+        .iter()
+        .map(|(a, b)| {
+            let start_s = *a as f64 / fps as f64;
+            let end_s = *b as f64 / fps as f64;
+            format!("between(t\\,{start_s:.6}\\,{end_s:.6})")
+        })
+        .collect();
+    format!("aselect='{}',asetpts=N/SR/TB", exprs.join("+"))
+}
+
+/// Frame-accurate trim: for each input, strip `start_frames` from the
+/// front and `end_frames` from the back, write the result alongside the
+/// source as `<stem>_trimmed.<ext>`. Per-file independent — every input
+/// receives the same pair of values applied to its own timeline, so a
+/// 3-file selection produces 3 outputs.
+///
+/// `remove_range`, when `Some((rm_from, rm_to))`, also excises the
+/// frame range `[rm_from, rm_to]` (inclusive both ends) from the
+/// middle. Combinable with `start_frames`/`end_frames` — e.g. strip 5
+/// from each end AND cut frames 50-80 in one pass produces a single
+/// output joining the two surviving spans.
+///
+/// Internally each input collapses to a list of half-open kept
+/// intervals `[(start, end), ...]`. The single-interval case (no
+/// middle cut) uses ffmpeg's `trim`/`atrim` filters — well-trodden,
+/// minimum filter overhead. Two-interval cases (middle cut splits the
+/// keep region) switch to `select`/`aselect` which take an arbitrary
+/// boolean expression over frame number / timestamp, so multiple
+/// non-contiguous spans concatenate naturally.
+///
+/// Stream-copy isn't an option here: trimming on arbitrary frame
+/// boundaries crosses GOPs, so we re-encode at a near-lossless
+/// baseline (CRF 17 / preset=slow / 256k AAC for MP4, 255-color
+/// sierra2_4a-dithered palette for GIF) — Trim should feel seamless,
+/// not size-optimized. Audio, when present, is trimmed in seconds
+/// derived from `frames / fps` so video and audio stay in sync at
+/// frame boundaries.
+pub fn encode_trim_files(
+    ffmpeg: &Path,
+    files: &[PathBuf],
+    start_frames: u32,
+    end_frames: u32,
+    remove_range: Option<(u32, u32)>,
+    settings: &Settings,
+    mut on_progress: impl FnMut(ProgressEvent),
+) -> Result<()> {
+    if files.is_empty() {
+        bail!("Trim needs at least one file");
+    }
+    let total = files.len();
+    let verbosity = settings.verbosity.clone().unwrap_or_else(|| "warning".into());
+
+    for (idx, input) in files.iter().enumerate() {
+        let file_index = idx + 1;
+        let input_display = input.display().to_string();
+        let ext = input
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("mp4")
+            .to_ascii_lowercase();
+        let is_gif = ext == "gif";
+
+        let total_frames = probe_total_frames(ffmpeg, input);
+        let probe = probe_video(ffmpeg, input);
+        let fps = probe.fps.unwrap_or(30).max(1);
+
+        let Some(total_frames) = total_frames else {
+            on_progress(ProgressEvent {
+                file_index,
+                total_files: total,
+                input: input_display.clone(),
+                stage: "error".into(),
+                percent: None,
+                message: Some("Could not read frame count from this file.".into()),
+            });
+            continue;
+        };
+        // Compute the half-open kept intervals [start, end) (exclusive
+        // upper bound, matching ffmpeg's `trim` filter semantics).
+        let intervals = compute_kept_intervals(
+            total_frames,
+            start_frames as u64,
+            end_frames as u64,
+            remove_range.map(|(a, b)| (a as u64, b as u64)),
+        );
+        if intervals.is_empty() {
+            on_progress(ProgressEvent {
+                file_index,
+                total_files: total,
+                input: input_display.clone(),
+                stage: "error".into(),
+                percent: None,
+                message: Some(format!(
+                    "Trim would leave nothing — file has {total_frames} frames, requested settings remove all of them.",
+                )),
+            });
+            continue;
+        }
+        let kept_frames: u64 = intervals.iter().map(|(a, b)| b - a).sum();
+        let kept_duration_s = kept_frames as f64 / fps as f64;
+        let is_multi = intervals.len() > 1;
+
+        let stem = input
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("output")
+            .to_string();
+        let dir = input.parent().unwrap_or(Path::new(".")).to_path_buf();
+        let base = dir.join(format!("{stem}_trimmed.{ext}"));
+        let out = unique_output_path(&base);
+
+        let has_audio = !is_gif && has_audio_stream(ffmpeg, input);
+
+        if is_gif {
+            // GIF: two-pass with palette. Trim before palettegen so the
+            // palette is built from the kept frames only — otherwise
+            // colors that only existed in trimmed-away frames could
+            // win a slot they're never going to use.
+            on_progress(ProgressEvent {
+                file_index,
+                total_files: total,
+                input: input_display.clone(),
+                stage: "palette".into(),
+                percent: None,
+                message: Some("Generating palette".into()),
+            });
+
+            let palette_tmp = {
+                let nonce = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_nanos())
+                    .unwrap_or(0);
+                paths::tmp_dir()
+                    .unwrap_or_else(|_| std::env::temp_dir())
+                    .join(format!(
+                        "{stem}.{}.{nonce}.trim.palette.png",
+                        std::process::id()
+                    ))
+            };
+            struct PaletteGuard(PathBuf);
+            impl Drop for PaletteGuard {
+                fn drop(&mut self) {
+                    let _ = std::fs::remove_file(&self.0);
+                }
+            }
+            let _palette_guard = PaletteGuard(palette_tmp.clone());
+
+            // Single-interval (no middle cut) → use trim, which is
+            // simpler and well-tested. Multi-interval → use select with
+            // an OR'd list of `between(n, A, B-1)` clauses, then re-time
+            // the surviving frames with setpts. Both end with a clean
+            // `[0:v]<filter>` chain that downstream filters consume.
+            let video_chop = build_video_chop_filter(&intervals);
+            // Trim is meant to feel lossless — bump GIF quality to the
+            // top of the palette (the maximum a GIF can carry; the
+            // remaining 256th slot is reserved for transparency).
+            // `stats_mode=full` builds the palette from every kept
+            // frame instead of representative ones, which matters for
+            // animations whose colors shift over time. The size cost
+            // is real but Trim isn't the place to optimize size — the
+            // quality presets are.
+            let pal_filter = format!("[0:v]{video_chop},palettegen=max_colors=255:stats_mode=full");
+
+            let mut pal_cmd = Command::new(ffmpeg);
+            pal_cmd.args(["-v", &verbosity, "-y"]);
+            pal_cmd.arg("-i").arg(input);
+            pal_cmd
+                .args(["-filter_complex", &pal_filter])
+                .arg(&palette_tmp)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null());
+            hide_console(&mut pal_cmd);
+            let status = pal_cmd
+                .status()
+                .context("spawning ffmpeg for trim palette")?;
+            if !status.success() {
+                bail!("trim palette pass failed");
+            }
+
+            on_progress(ProgressEvent {
+                file_index,
+                total_files: total,
+                input: input_display.clone(),
+                stage: "encode".into(),
+                percent: None,
+                message: Some(format!(
+                    "Encoding GIF — {kept_frames} frames (high quality){}",
+                    if is_multi { ", middle cut" } else { "" }
+                )),
+            });
+
+            // sierra2_4a is the highest-quality dither GIF supports —
+            // smoother gradients and less visible pattern noise than
+            // bayer at the cost of a slightly larger file. Trim wants
+            // quality first, so use it here even though our other GIF
+            // tools default to bayer for size.
+            let p2 = format!(
+                "[0:v]{video_chop}[v];[v][1:v]paletteuse=dither=sierra2_4a"
+            );
+            let mut cmd = Command::new(ffmpeg);
+            cmd.args(["-v", &verbosity, "-y", "-hide_banner"]);
+            cmd.arg("-i").arg(input);
+            cmd.arg("-i").arg(&palette_tmp);
+            cmd.args(["-filter_complex", &p2])
+                .args(["-progress", "pipe:1"])
+                .arg(&out);
+            run_with_progress(
+                cmd,
+                Some(kept_duration_s),
+                file_index,
+                total,
+                &input_display,
+                "encode",
+                &mut on_progress,
+            )?;
+        } else {
+            on_progress(ProgressEvent {
+                file_index,
+                total_files: total,
+                input: input_display.clone(),
+                stage: "encode".into(),
+                percent: None,
+                message: Some(format!(
+                    "Trimming MP4 — keeping {kept_frames} of {total_frames} frames (visually lossless{}{})",
+                    if has_audio { " + audio" } else { "" },
+                    if is_multi { ", middle cut" } else { "" }
+                )),
+            });
+
+            // Build filter graph. For a single kept interval we emit
+            // `trim`/`atrim`; for multiple intervals we emit
+            // `select`/`aselect` over the union of frame-number /
+            // timestamp ranges. The audio side translates the same
+            // frame boundaries to seconds (frames / fps) so video and
+            // audio stay aligned at every cut.
+            let video_chop = build_video_chop_filter(&intervals);
+            let mut graph = format!("[0:v]{video_chop}[v]");
+            if has_audio {
+                let audio_chop = build_audio_chop_filter(&intervals, fps);
+                graph.push_str(&format!(";[0:a]{audio_chop}[a]"));
+            }
+
+            let mut cmd = Command::new(ffmpeg);
+            cmd.args(["-v", &verbosity, "-y", "-hide_banner"]);
+            cmd.arg("-i").arg(input);
+            cmd.args(["-filter_complex", &graph])
+                .args(["-map", "[v]"]);
+            if has_audio {
+                cmd.args(["-map", "[a]"]);
+            }
+            // Trim is "chop the ends, keep everything else" — quality
+            // should be transparent. CRF 17 is below x264's
+            // visually-lossless threshold (~18) so re-encoding round-
+            // trips without obvious quality loss; preset=slow gives
+            // better compression efficiency at that quality. yuv420p
+            // stays for player compatibility (yuv444p breaks Quick-
+            // Time and most consumer players). Audio jumps to 256k AAC
+            // — transparent for stereo content and the size delta is
+            // tiny next to the video.
+            cmd.args([
+                "-c:v", "libx264",
+                "-preset", "slow",
+                "-crf", "17",
+                "-pix_fmt", "yuv420p",
+                "-movflags", "+faststart",
+            ]);
+            if has_audio {
+                cmd.args(["-c:a", "aac", "-b:a", "256k"]);
+            } else {
+                cmd.arg("-an");
+            }
+            cmd.args(["-progress", "pipe:1"]).arg(&out);
+            run_with_progress(
+                cmd,
+                Some(kept_duration_s),
+                file_index,
+                total,
+                &input_display,
+                "encode",
+                &mut on_progress,
+            )?;
+        }
+
+        on_progress(ProgressEvent {
+            file_index,
+            total_files: total,
+            input: input_display,
+            stage: "done".into(),
+            percent: Some(1.0),
+            message: Some(out.display().to_string()),
+        });
+    }
+
+    Ok(())
+}
+
 /// Side-by-side Compare: stack N inputs horizontally into one output.
 /// Each input is scaled to the first file's height and normalized to
 /// its fps so hstack sees uniform streams. Output format matches the

@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import type { Preset, Settings, FfmpegStatus, ProgressEvent, UpdateInfo } from "./types";
+import type { Preset, Settings, FfmpegStatus, ProgressEvent, UpdateInfo, TrimLast } from "./types";
 
 export const listPresets = () => invoke<Preset[]>("list_presets");
 export const savePresets = (presets: Preset[]) => invoke<void>("save_presets", { presetsIn: presets });
@@ -30,6 +30,9 @@ export function onFfmpegDownload(
 
 export const getCustomLast = () => invoke<Preset>("get_custom_last");
 export const saveCustomLast = (preset: Preset) => invoke<void>("save_custom_last", { preset });
+
+export const getTrimLast = () => invoke<TrimLast>("get_trim_last");
+export const saveTrimLast = (trim: TrimLast) => invoke<void>("save_trim_last", { trim });
 
 export const syncIntegrations = () => invoke<void>("sync_integrations");
 export const restartExplorer = () => invoke<void>("restart_explorer");
@@ -62,6 +65,29 @@ export const encodeCompare = (files: string[]) =>
 export const encodeOverlay = (files: string[]) =>
   invoke<void>("encode_overlay", { files });
 
+/** Trim encode: strip `startFrames` from the front and `endFrames`
+ *  from the back of each input, and optionally cut the inclusive
+ *  range `[removeFrom, removeTo]` from the middle. Per-file
+ *  independent — the same set of values is applied to each input's
+ *  own timeline. Output is `<stem>_trimmed.<ext>` next to each source.
+ *  Pass `null` (or omit) for `removeFrom`/`removeTo` to skip the
+ *  middle cut; both must be set and in non-inverted order for the
+ *  cut to actually run. */
+export const encodeTrim = (
+  files: string[],
+  startFrames: number,
+  endFrames: number,
+  removeFrom?: number | null,
+  removeTo?: number | null,
+) =>
+  invoke<void>("encode_trim", {
+    files,
+    startFrames,
+    endFrames,
+    removeFrom: removeFrom ?? null,
+    removeTo: removeTo ?? null,
+  });
+
 export const getPendingFiles = () => invoke<string[]>("get_pending_files");
 export const getPendingPresetId = () => invoke<string | null>("get_pending_preset_id");
 export const getPendingCustomPreset = () => invoke<Preset | null>("get_pending_custom_preset");
@@ -69,6 +95,7 @@ export const getPendingMerge = () => invoke<boolean>("get_pending_merge");
 export const getPendingGrayscale = () => invoke<boolean>("get_pending_grayscale");
 export const getPendingCompare = () => invoke<boolean>("get_pending_compare");
 export const getPendingOverlay = () => invoke<boolean>("get_pending_overlay");
+export const getPendingTrimDialog = () => invoke<boolean>("get_pending_trim_dialog");
 
 /** Stash files + custom preset in app state ahead of navigating the current
  * webview to the progress route. Unlike the old `start_custom_encode`, this
@@ -76,6 +103,26 @@ export const getPendingOverlay = () => invoke<boolean>("get_pending_overlay");
  * navigate its own webview to /progress/ after this resolves. */
 export const prepareCustomEncode = (files: string[], preset: Preset) =>
   invoke<void>("prepare_custom_encode", { files, preset });
+
+/** Stash files in app state ahead of the Trim dialog navigating in-place
+ *  to /progress/. Persists the chosen frame counts (and optional middle
+ *  cut) to disk so the dialog reopens with them next time. The progress
+ *  page picks up the files via `getPendingFiles()` and calls
+ *  `encodeTrim` directly. */
+export const prepareTrimEncode = (
+  files: string[],
+  startFrames: number,
+  endFrames: number,
+  removeFrom?: number | null,
+  removeTo?: number | null,
+) =>
+  invoke<void>("prepare_trim_encode", {
+    files,
+    startFrames,
+    endFrames,
+    removeFrom: removeFrom ?? null,
+    removeTo: removeTo ?? null,
+  });
 
 export function onProgress(fn: (ev: ProgressEvent) => void): Promise<UnlistenFn> {
   return listen<ProgressEvent>("encode-progress", (e) => fn(e.payload));
