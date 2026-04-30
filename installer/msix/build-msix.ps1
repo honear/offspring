@@ -44,8 +44,18 @@ $msixDir  = Join-Path $repoRoot "installer\msix"
 $distDir  = Join-Path $msixDir "dist"
 $stageDir = Join-Path $msixDir "stage"
 $iconsSrc = Join-Path $repoRoot "src-tauri\icons"
+# CI / hardware-token path: when $env:OFFSPRING_PFX_PATH is set, the
+# script reads the signing PFX from that path (e.g. a CI secret cache,
+# a TPM-backed key on a build machine) and never touches the in-repo
+# `.cert` directory. Without the override we fall back to the legacy
+# dev location so local "first build on a fresh checkout" still works.
 $certDir  = Join-Path $msixDir ".cert"
-$certPath = Join-Path $certDir "offspring-shellext.pfx"
+if ($env:OFFSPRING_PFX_PATH) {
+    $certPath = $env:OFFSPRING_PFX_PATH
+    Write-Host "Using PFX from `$env:OFFSPRING_PFX_PATH: $certPath"
+} else {
+    $certPath = Join-Path $certDir "offspring-shellext.pfx"
+}
 $certCer  = Join-Path $distDir "OffspringShellExt.cer"
 $msixOut  = Join-Path $distDir "OffspringShellExt.msix"
 
@@ -71,19 +81,35 @@ foreach ($t in @($makeAppx, $signTool)) {
 New-Item -ItemType Directory -Force -Path $certDir, $distDir, $stageDir | Out-Null
 
 if (-not (Test-Path $certPath)) {
+    if ($env:OFFSPRING_PFX_PATH) {
+        # Caller pointed us at a specific PFX (CI secret, hardware
+        # token, etc.) but it doesn't exist. Don't silently create a
+        # new self-signed dev cert at that location — that would be a
+        # surprising side effect. Surface the misconfiguration loudly.
+        throw "OFFSPRING_PFX_PATH is set to '$certPath' but no file exists there. Provision the PFX before running this script, or unset the env var to fall back to the dev cert."
+    }
     Write-Host "Creating self-signed certificate (CN=Second March)..."
+    # Cap the dev cert at 2 years so a leaked PFX has a hard horizon.
+    # Long enough for normal release cycles, short enough to limit blast
+    # radius. Producers of real release builds should replace this with
+    # a code-signing cert from a trusted CA + hardware-token storage.
+    $notBefore = Get-Date
+    $notAfter  = $notBefore.AddYears(2)
     $cert = New-SelfSignedCertificate `
         -Type Custom `
         -Subject "CN=Second March" `
         -KeyUsage DigitalSignature `
         -FriendlyName "Offspring Shell Ext Dev Cert" `
         -CertStoreLocation "Cert:\CurrentUser\My" `
+        -NotBefore $notBefore `
+        -NotAfter $notAfter `
         -TextExtension @("2.5.29.37={text}1.3.6.1.5.5.7.3.3", "2.5.29.19={text}")
     $pwd = ConvertTo-SecureString -String $PfxPassword -Force -AsPlainText
     Export-PfxCertificate -Cert $cert -FilePath $certPath -Password $pwd | Out-Null
     Export-Certificate    -Cert $cert -FilePath $certCer                  | Out-Null
     Write-Host "  PFX: $certPath"
     Write-Host "  CER: $certCer"
+    Write-Host ("  Valid: {0:yyyy-MM-dd} → {1:yyyy-MM-dd}" -f $notBefore, $notAfter)
 } else {
     Write-Host "Reusing existing cert: $certPath"
     # Keep the public .cer in dist/ up to date in case the distribution

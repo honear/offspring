@@ -29,6 +29,28 @@ const GITHUB_SLUG: &str = "honear/offspring";
 /// longer read timeout since it streams ~10-30 MB.
 const TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Pinned minisign public key (raw base64 form — the second line of
+/// `offspring.pub`, NOT the leading `untrusted comment:` line).
+///
+/// When non-empty, every downloaded installer is verified against an
+/// Ed25519 signature published as a `<installer-url>.minisig` asset on
+/// the same GitHub release; the installer is refused if no signature
+/// is present, the signature doesn't match this key, or the signed
+/// bytes don't match the downloaded file.
+///
+/// Generate a keypair with `minisign -G -p offspring.pub -s offspring.key`
+/// (keep `.key` offline — out of CI, in a hardware token if possible) and
+/// paste the second line of `offspring.pub` here (the base64 blob
+/// starting with `RW…`). After that, sign each release installer with
+/// `minisign -Sm Offspring-Setup-X.Y.Z.exe -s offspring.key` and upload
+/// the resulting `.minisig` alongside the `.exe`.
+///
+/// While this constant is empty the verifier falls back to "log a
+/// warning and proceed" — same effective behaviour as before this code
+/// existed, so flipping verification on is a strict tightening with no
+/// regressions for already-published releases.
+const UPDATE_MINISIGN_PUBKEY: &str = "";
+
 #[derive(Serialize, Clone, Debug, Default)]
 pub struct UpdateInfo {
     /// Running version from `CARGO_PKG_VERSION` (e.g. "0.2.0").
@@ -309,9 +331,15 @@ fn stream_installer(app: &AppHandle, version: &str, url: &str) -> Result<PathBuf
     // light sanity guard against a truncated partial from a prior crash —
     // <1 MB almost certainly means a broken download, since every
     // Offspring installer to date is several MB.
+    //
+    // The integrity verification still runs against the cached file so
+    // an attacker who managed to plant a swapped .exe in the user's
+    // updates directory between sessions can't ride the cache to skip
+    // signature checking.
     if final_path.exists() {
         if let Ok(meta) = std::fs::metadata(&final_path) {
             if meta.len() > 1_000_000 {
+                verify_installer_signature(&final_path, version, url)?;
                 return Ok(final_path);
             }
         }
@@ -396,6 +424,16 @@ fn stream_installer(app: &AppHandle, version: &str, url: &str) -> Result<PathBuf
         bail!("downloaded installer is suspiciously small ({downloaded} bytes) — server returned a truncated response");
     }
 
+    // Verify integrity BEFORE the atomic rename so a failed signature
+    // never leaves a usable installer on disk for `install_update` to
+    // run. If verification fails (or signature is missing when
+    // verification is required), the .part file is removed and the
+    // error bubbles up — no installer is staged.
+    if let Err(e) = verify_installer_signature(&tmp_path, version, url) {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(e);
+    }
+
     // Atomically move into place. If a stale file exists from an earlier
     // partial attempt, nuke it first — Windows's rename won't overwrite.
     if final_path.exists() {
@@ -407,6 +445,66 @@ fn stream_installer(app: &AppHandle, version: &str, url: &str) -> Result<PathBuf
     let _ = std::fs::remove_file(&tmp_path);
 
     Ok(final_path)
+}
+
+/// Verify the integrity of a downloaded installer. When
+/// [`UPDATE_MINISIGN_PUBKEY`] is non-empty, this fetches the
+/// `<asset-url>.minisig` sidecar from the same GitHub release, parses
+/// it as a minisign signature, and checks that the file's bytes match
+/// the signed digest under the pinned public key. Mismatches, missing
+/// sidecars, or unreadable signatures are hard errors — the installer
+/// is refused.
+///
+/// When the pubkey is the empty placeholder we log a one-line warning
+/// to `debug.log` (so the lapse is auditable later) and return Ok.
+/// That's the same behaviour that existed before this code, so flipping
+/// the constant on is a strict tightening with no surprise regressions
+/// for already-published unsigned releases.
+fn verify_installer_signature(file: &std::path::Path, _version: &str, url: &str) -> Result<()> {
+    if UPDATE_MINISIGN_PUBKEY.is_empty() {
+        crate::debug_log::log(&format!(
+            "update: minisign verification skipped — UPDATE_MINISIGN_PUBKEY is the empty placeholder. \
+             Generate a key (`minisign -G`), paste the public key into updates.rs, and start signing \
+             releases (`minisign -Sm <installer>.exe`) before publishing this build."
+        ));
+        return Ok(());
+    }
+
+    use minisign_verify::{PublicKey, Signature};
+
+    // `from_base64` expects the bare base64 line (the body of
+    // offspring.pub, not the `untrusted comment:` header).
+    let pubkey = PublicKey::from_base64(UPDATE_MINISIGN_PUBKEY)
+        .map_err(|e| anyhow!("invalid pinned minisign public key: {e}"))?;
+
+    // Sidecar URL = `<installer-url>.minisig` on the same release. We
+    // already validated the installer URL host (see is_trusted_asset_host
+    // in `download_update`), and the sidecar shares that host.
+    let sig_url = format!("{url}.minisig");
+    let agent = ureq::AgentBuilder::new()
+        .timeout_connect(Duration::from_secs(20))
+        .timeout_read(Duration::from_secs(60))
+        .build();
+    let sig_text: String = agent
+        .get(&sig_url)
+        .set("User-Agent", &format!("Offspring/{}", env!("CARGO_PKG_VERSION")))
+        .call()
+        .with_context(|| format!("fetching minisign sidecar {sig_url}"))?
+        .into_string()
+        .context("reading minisign sidecar body")?;
+
+    let signature = Signature::decode(&sig_text)
+        .map_err(|e| anyhow!("parsing minisign signature: {e}"))?;
+
+    let bytes = std::fs::read(file)
+        .with_context(|| format!("reading {} for verification", file.display()))?;
+    pubkey
+        .verify(&bytes, &signature, false)
+        .map_err(|e| anyhow!(
+            "installer minisign signature did not verify against the pinned key: {e}"
+        ))?;
+
+    Ok(())
 }
 
 /// Semver-lite "is `a` newer than `b`". Both are expected to look like

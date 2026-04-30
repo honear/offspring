@@ -40,6 +40,14 @@ winreg = "0.55"
 # stack pure-Rust (rustls) so the installer stays self-contained.
 ureq = { version = "2", default-features = false, features = ["tls"] }
 zip  = { version = "2",  default-features = false, features = ["deflate"] }
+# Supply-chain integrity: sha2 verifies the gyan.dev FFmpeg ZIP against
+# its published SHA-256 sidecar; minisign-verify checks that the
+# downloaded auto-update installer was signed by the offline private key
+# whose public counterpart is pinned in `updates.rs`. Both crates are
+# small and pure-Rust so they don't pull in C deps or grow the binary
+# noticeably.
+sha2 = "0.10"
+minisign-verify = "0.2"
 
 [profile.release]
 codegen-units = 1

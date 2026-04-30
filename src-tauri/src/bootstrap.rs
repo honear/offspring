@@ -11,6 +11,7 @@
 
 use anyhow::{anyhow, bail, Context, Result};
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::time::Duration;
@@ -19,6 +20,14 @@ use tauri::{AppHandle, Emitter};
 use crate::paths;
 
 const FFMPEG_URL: &str = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip";
+/// gyan.dev publishes a SHA-256 sidecar next to every release ZIP. The
+/// app downloads both, computes the hash of the ZIP, and refuses to
+/// extract on mismatch. Doesn't fully neutralise an attacker who can
+/// MITM gyan.dev's TLS (they could swap both files), but it does
+/// defeat partial-compromise / cache-poisoning scenarios where one
+/// URL gets tampered with and not the other, and it catches transport-
+/// or storage-level corruption.
+const FFMPEG_SHA256_URL: &str = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip.sha256";
 
 #[derive(Serialize, Clone, Debug)]
 pub struct DownloadEvent {
@@ -103,6 +112,10 @@ fn download_and_install(app: &AppHandle) -> Result<PathBuf> {
     let mut buf = [0u8; 64 * 1024];
     let mut downloaded: u64 = 0;
     let mut last_emit = std::time::Instant::now();
+    // Hash the bytes as they stream past so we don't have to re-read
+    // the file from disk after the download finishes. SHA-256 is fast
+    // enough (~500 MB/s on modern x86) that this never gates progress.
+    let mut hasher = Sha256::new();
 
     loop {
         let n = reader.read(&mut buf).context("reading zip stream")?;
@@ -110,6 +123,7 @@ fn download_and_install(app: &AppHandle) -> Result<PathBuf> {
             break;
         }
         file.write_all(&buf[..n]).context("writing temp zip")?;
+        hasher.update(&buf[..n]);
         downloaded += n as u64;
 
         // Throttle progress emits so we don't flood the event bus.
@@ -143,6 +157,31 @@ fn download_and_install(app: &AppHandle) -> Result<PathBuf> {
         }
     }
     drop(file);
+    let computed_hash = hex_lower(&hasher.finalize());
+
+    // --- 1b. Verify the SHA-256 against gyan.dev's published sidecar ---
+    // Use a fresh agent so the verify call doesn't inherit the long
+    // read timeout the download agent needed. Failing here aborts the
+    // bootstrap before we touch the extract path, so a tampered or
+    // corrupted ZIP never reaches the user's filesystem as a real
+    // ffmpeg.exe.
+    emit(
+        app,
+        DownloadEvent {
+            phase: "downloading".into(),
+            percent: None,
+            message: Some("Verifying checksum…".into()),
+        },
+    );
+    let expected_hash = fetch_expected_sha256()
+        .context("fetching FFmpeg SHA-256 sidecar from gyan.dev")?;
+    if !constant_time_eq(computed_hash.as_bytes(), expected_hash.as_bytes()) {
+        let _ = std::fs::remove_file(&tmp_zip);
+        bail!(
+            "FFmpeg ZIP integrity check failed: expected sha256 {expected_hash}, got {computed_hash}. \
+             Refusing to install. Try again later, or set a manual ffmpeg.exe path in Settings."
+        );
+    }
 
     // --- 2. Extract -------------------------------------------------------
     emit(
@@ -214,4 +253,79 @@ fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> Result<()
         }
     }
     Ok(())
+}
+
+/// Lowercase hex of a digest. Standalone instead of pulling in the
+/// `hex` crate just for this — the loop is straightforward and the
+/// result is only used for a constant-time string comparison.
+fn hex_lower(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        s.push(HEX[(*b >> 4) as usize] as char);
+        s.push(HEX[(*b & 0x0f) as usize] as char);
+    }
+    s
+}
+
+/// Constant-time byte-slice equality. Avoids leaking timing information
+/// during hash comparison — almost certainly overkill against a remote
+/// attacker, but cheap enough that we may as well not skip it.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff: u8 = 0;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
+/// Pull gyan.dev's `.sha256` sidecar and extract the first 64-hex-char
+/// run we find. Sidecar format varies — sometimes a bare hash, sometimes
+/// `<hash> *<filename>` (BSD style), sometimes `<hash>  <filename>` (GNU
+/// style). All of those have the same first token, so a regex-light
+/// scan is enough. We tolerate trailing junk but reject the response if
+/// no 64-hex run is present (HTML 5xx pages, redirects, blank).
+fn fetch_expected_sha256() -> Result<String> {
+    let agent = ureq::AgentBuilder::new()
+        .timeout_connect(Duration::from_secs(20))
+        .timeout_read(Duration::from_secs(30))
+        .build();
+    let body: String = agent
+        .get(FFMPEG_SHA256_URL)
+        .call()?
+        .into_string()?;
+    let trimmed = body.trim();
+    // Find the first 64-hex run. Anchored to ASCII so multi-byte
+    // surprises in a tampered response can't slide a "valid" hash past us.
+    for word in trimmed.split_whitespace() {
+        if word.len() == 64 && word.chars().all(|c| c.is_ascii_hexdigit()) {
+            return Ok(word.to_ascii_lowercase());
+        }
+    }
+    Err(anyhow!(
+        "SHA-256 sidecar response did not contain a 64-hex hash: {:?}",
+        trimmed.chars().take(120).collect::<String>()
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hex_lower_basic() {
+        assert_eq!(hex_lower(&[0x00, 0xff, 0xab]), "00ffab");
+        assert_eq!(hex_lower(&[]), "");
+    }
+
+    #[test]
+    fn constant_time_eq_basic() {
+        assert!(constant_time_eq(b"abc", b"abc"));
+        assert!(!constant_time_eq(b"abc", b"abd"));
+        assert!(!constant_time_eq(b"abc", b"abcd"));
+        assert!(constant_time_eq(b"", b""));
+    }
 }
