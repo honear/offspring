@@ -113,7 +113,22 @@ pub fn restart_explorer() -> Result<(), String> {
 #[tauri::command]
 pub fn open_data_folder() -> Result<(), String> {
     let p = paths::data_dir().map_err(|e| e.to_string())?;
-    std::process::Command::new("explorer")
+    // Resolve the absolute path to Explorer so a planted `explorer.exe`
+    // in a PATH entry / current dir can't be invoked instead. Falls
+    // back to the bare name if `%SystemRoot%` is unset, which keeps
+    // this working on systems where the env var has been scrubbed.
+    let exe = match std::env::var_os("SystemRoot") {
+        Some(root) => {
+            let candidate = std::path::PathBuf::from(root).join("explorer.exe");
+            if candidate.exists() {
+                candidate
+            } else {
+                std::path::PathBuf::from("explorer.exe")
+            }
+        }
+        None => std::path::PathBuf::from("explorer.exe"),
+    };
+    std::process::Command::new(exe)
         .arg(&p)
         .spawn()
         .map_err(|e| e.to_string())?;
@@ -284,7 +299,29 @@ pub fn encode_merge(
             .iter()
             .map(|p| {
                 let s = p.display().to_string();
-                format!("file '{}'\n", s.replace('\'', "'\\''"))
+                // ffmpeg's concat demuxer parses `\` as the escape
+                // character inside single-quoted strings, so we have to
+                // double any literal backslashes before they reach the
+                // file. Then close-and-reopen the quote pair around any
+                // `'`, and finally drop control characters that could
+                // otherwise inject a new `file '...'` line into the
+                // listing.
+                let mut escaped = String::with_capacity(s.len());
+                for c in s.chars() {
+                    if (c as u32) < 0x20 {
+                        // CR/LF/etc. shouldn't appear in Windows paths,
+                        // but if a hostile filename reached us through
+                        // some other channel, swallowing them keeps the
+                        // listing single-line.
+                        continue;
+                    }
+                    match c {
+                        '\\' => escaped.push_str("\\\\"),
+                        '\'' => escaped.push_str("'\\''"),
+                        _ => escaped.push(c),
+                    }
+                }
+                format!("file '{escaped}'\n")
             })
             .collect();
         std::fs::write(&list_path, list_body)

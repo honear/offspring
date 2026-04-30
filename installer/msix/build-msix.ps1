@@ -26,10 +26,18 @@
 param(
     [string]$Configuration = "Release",
     [string]$Version       = "0.2.0.0",
-    [string]$PfxPassword   = "offspring-dev"
+    # Default to whatever's in $env:OFFSPRING_PFX_PASSWORD so secrets stay
+    # out of the source tree and out of process listings. Falls back to
+    # the legacy dev password ONLY when no env var is set; release builds
+    # should always export OFFSPRING_PFX_PASSWORD before invoking this.
+    [string]$PfxPassword   = $(if ($env:OFFSPRING_PFX_PASSWORD) { $env:OFFSPRING_PFX_PASSWORD } else { "offspring-dev" })
 )
 
 $ErrorActionPreference = "Stop"
+
+if ($PfxPassword -eq "offspring-dev") {
+    Write-Warning "Using the built-in dev PFX password. Set `$env:OFFSPRING_PFX_PASSWORD before publishing a release build."
+}
 
 $repoRoot = Resolve-Path (Join-Path $PSScriptRoot "..\..")
 $msixDir  = Join-Path $repoRoot "installer\msix"

@@ -75,11 +75,67 @@ pub struct UpdateDownloadEvent {
     pub message: Option<String>,
 }
 
+/// True iff `tag` looks like a plausible release tag we'd publish:
+/// optional leading `v`, then `MAJOR.MINOR.PATCH` of ASCII digits, then
+/// optionally a pre-release-style suffix like `-bNNNN` or `-rc1`. Any
+/// other shape (URL fragments, whitespace, JSON injected through the
+/// `tag_name` slot) is rejected so the rest of the update path doesn't
+/// end up holding an attacker-controlled string.
+fn is_plausible_tag(tag: &str) -> bool {
+    let s = tag.trim_start_matches('v');
+    if s.is_empty() || s.len() > 64 {
+        return false;
+    }
+    let (core, suffix) = match s.split_once('-') {
+        Some((c, suf)) => (c, Some(suf)),
+        None => (s, None),
+    };
+    let parts: Vec<&str> = core.split('.').collect();
+    if parts.len() != 3 {
+        return false;
+    }
+    if !parts.iter().all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit())) {
+        return false;
+    }
+    if let Some(suf) = suffix {
+        if suf.is_empty()
+            || !suf
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
+        {
+            return false;
+        }
+    }
+    true
+}
+
+/// True iff `url` is an https URL whose host is one of the GitHub-owned
+/// download endpoints. We only ever expect installer assets from
+/// `github.com` (the redirect page) or `objects.githubusercontent.com`
+/// (the redirect target the API hands us). Anything else means the
+/// release JSON was tampered with or the maintainer pasted an asset URL
+/// from a third-party mirror — neither is something we want to silently
+/// download and execute.
+fn is_trusted_asset_host(url: &str) -> bool {
+    const ALLOWED: &[&str] = &[
+        "github.com",
+        "objects.githubusercontent.com",
+        "release-assets.githubusercontent.com",
+    ];
+    let Some(rest) = url.strip_prefix("https://") else {
+        return false;
+    };
+    let host = rest.split(['/', '?', '#']).next().unwrap_or("");
+    let host = host.split('@').next_back().unwrap_or(""); // strip any userinfo
+    let host = host.split(':').next().unwrap_or("").to_ascii_lowercase();
+    ALLOWED.iter().any(|h| *h == host)
+}
+
 #[tauri::command]
 pub fn check_for_updates() -> UpdateInfo {
     let current = env!("CARGO_PKG_VERSION").to_string();
     match fetch_latest() {
-        Ok(rel) if !rel.draft && !rel.prerelease => {
+        Ok(rel) if !rel.draft && !rel.prerelease && is_plausible_tag(&rel.tag_name) => {
             let latest = rel.tag_name.trim_start_matches('v').to_string();
             let update_available = is_newer(&latest, &current);
             let installer_url = rel
@@ -87,7 +143,9 @@ pub fn check_for_updates() -> UpdateInfo {
                 .iter()
                 .find(|a| {
                     let n = a.name.to_ascii_lowercase();
-                    n.starts_with("offspring-setup") && n.ends_with(".exe")
+                    n.starts_with("offspring-setup")
+                        && n.ends_with(".exe")
+                        && is_trusted_asset_host(&a.browser_download_url)
                 })
                 .map(|a| a.browser_download_url.clone())
                 .unwrap_or_default();
@@ -132,6 +190,16 @@ fn fetch_latest() -> Result<GhRelease> {
 pub fn download_update(app: AppHandle, version: String, installer_url: String) -> Result<(), String> {
     if installer_url.is_empty() {
         return Err("no installer asset available on this release".into());
+    }
+    // Belt-and-braces: even though `check_for_updates` already filters
+    // assets by host, the frontend hands the URL straight back through
+    // an IPC arg. Re-validate here so a future webview-side bug or a
+    // crafted IPC call can't point us at an arbitrary download host.
+    if !is_trusted_asset_host(&installer_url) {
+        return Err("installer URL is not on a trusted GitHub host".into());
+    }
+    if !is_plausible_tag(&version) && !is_plausible_tag(&format!("v{version}")) {
+        return Err("invalid version string".into());
     }
     std::thread::spawn(move || {
         let result = stream_installer(&app, &version, &installer_url);
@@ -190,7 +258,7 @@ pub fn install_update(version: String) -> Result<(), String> {
     // instance is running" prompts if the restart-app handshake misfires.
     // /LAUNCHAFTER — our custom flag; offspring.iss's ShouldLaunchAfter
     // [Code] check reads it to decide whether to relaunch the new exe.
-    std::process::Command::new(&path)
+    let mut child = std::process::Command::new(&path)
         .args(["/VERYSILENT", "/NORESTART", "/SUPPRESSMSGBOXES", "/LAUNCHAFTER"])
         .spawn()
         .map_err(|e| format!("spawning installer: {e}"))?;
@@ -198,8 +266,28 @@ pub fn install_update(version: String) -> Result<(), String> {
     // Give the installer a beat to start up (and for Windows to elevate
     // via UAC on its manifest) before we release our own exe file handle
     // by exiting — the installer can't overwrite offspring.exe while
-    // we still hold it.
+    // we still hold it. Before exiting, verify the child didn't bail out
+    // immediately (AV quarantine, broken Authenticode, missing manifest):
+    // if `try_wait` reports it's already exited with a non-zero status,
+    // surface the failure as an error instead of vanishing the app and
+    // leaving the user wondering where it went.
     std::thread::sleep(Duration::from_millis(500));
+    match child.try_wait() {
+        Ok(Some(status)) if !status.success() => {
+            return Err(format!(
+                "installer exited early with status {status}; update not applied"
+            ));
+        }
+        Ok(Some(_)) => {
+            // Exited successfully in <500ms — extremely unlikely for a
+            // real install, but treat it the same as "we did our part"
+            // and quit so the user can relaunch manually.
+        }
+        Ok(None) => {
+            // Still running, the expected path.
+        }
+        Err(e) => return Err(format!("checking installer status: {e}")),
+    }
     std::process::exit(0);
 }
 
@@ -351,5 +439,49 @@ mod tests {
         assert!(!is_newer("0.1.9", "0.2.0"));
         // Trailing garbage / pre-release suffixes shouldn't matter.
         assert!(is_newer("0.3.0-rc1", "0.2.0"));
+    }
+
+    #[test]
+    fn plausible_tag_accepts_release_shapes() {
+        assert!(is_plausible_tag("0.3.42"));
+        assert!(is_plausible_tag("v0.3.42"));
+        assert!(is_plausible_tag("0.3.42-b0007"));
+        assert!(is_plausible_tag("v1.0.0-rc1"));
+    }
+
+    #[test]
+    fn plausible_tag_rejects_garbage() {
+        assert!(!is_plausible_tag(""));
+        assert!(!is_plausible_tag("0.3"));
+        assert!(!is_plausible_tag("0.3.x"));
+        assert!(!is_plausible_tag("0.3.42 "));
+        assert!(!is_plausible_tag("0.3.42; rm -rf"));
+        // arbitrarily long, also rejected
+        assert!(!is_plausible_tag(&"1.".repeat(40)));
+    }
+
+    #[test]
+    fn trusted_host_accepts_github() {
+        assert!(is_trusted_asset_host(
+            "https://github.com/honear/offspring/releases/download/v0.3.42/Offspring-Setup-0.3.42.exe"
+        ));
+        assert!(is_trusted_asset_host(
+            "https://objects.githubusercontent.com/something/Offspring-Setup-0.3.42.exe"
+        ));
+    }
+
+    #[test]
+    fn trusted_host_rejects_others() {
+        assert!(!is_trusted_asset_host(""));
+        assert!(!is_trusted_asset_host(
+            "http://github.com/honear/offspring/releases/download/v1/foo.exe"
+        ));
+        assert!(!is_trusted_asset_host(
+            "https://evil.example.com/Offspring-Setup-0.3.42.exe"
+        ));
+        // Userinfo trick: real host is evil.example.com despite the prefix.
+        assert!(!is_trusted_asset_host(
+            "https://github.com@evil.example.com/foo.exe"
+        ));
     }
 }
