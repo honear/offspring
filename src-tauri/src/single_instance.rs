@@ -243,9 +243,15 @@ pub fn forward_argv_to_primary(argv: &[String]) -> Result<()> {
 /// The thread runs forever; there's no clean shutdown signal because
 /// the process exits when the primary's main event loop terminates,
 /// which kills the thread along with it.
+///
+/// `callback` only needs `Send + 'static` (not `Sync`) because every
+/// invocation runs on the same listener thread — there's no
+/// cross-thread sharing of the closure itself. This matters because
+/// the natural way to bridge to setup() is via an `mpsc::Sender`,
+/// which is `Send` but not `Sync`.
 pub fn start_listener<F>(callback: F)
 where
-    F: Fn(Vec<String>) + Send + Sync + 'static,
+    F: Fn(Vec<String>) + Send + 'static,
 {
     std::thread::spawn(move || {
         let name = pipe_name_w();

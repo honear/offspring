@@ -1,6 +1,12 @@
-export type Format = "gif" | "mp4";
+export type Format = "gif" | "mp4" | "image";
 export type Crop = "16:9" | "9:16" | "1:1" | "4:3";
 export type Dither = "bayer" | "floydsteinberg" | "sierra2" | "sierra24a" | "none";
+
+/** Encoder for `format=image` presets. Each codec defines its own
+ *  scale for `image_quality` — see the Rust side `ImageCodec` enum
+ *  for ranges. The UI's quality field re-labels and re-bounds itself
+ *  based on this value. */
+export type ImageCodec = "png" | "jpeg" | "webp" | "avif";
 
 export interface Preset {
   id: string;
@@ -21,6 +27,14 @@ export interface Preset {
   audio_bitrate?: string | null;
   use_cuda?: boolean | null;
   target_max_mb?: number | null;
+  /** Image-format only. PNG / JPEG / WebP / AVIF. */
+  image_codec?: ImageCodec | null;
+  /** Image-format only. Quality / compression level in the codec's
+   *  native scale (PNG: 0-9, JPEG: 1-100, WebP: 0-100, AVIF: 0-63). */
+  image_quality?: number | null;
+  /** Image-format only. Strip EXIF / GPS / camera-serial metadata
+   *  via ffmpeg's `-map_metadata -1`. On for shipped image presets. */
+  strip_metadata?: boolean | null;
   /** Desaturate the output to greyscale. Independent of format — works
    *  on both GIF and MP4. Also reachable as a standalone Tool. */
   grayscale?: boolean | null;

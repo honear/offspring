@@ -3,11 +3,61 @@ use serde::{Deserialize, Serialize};
 
 use crate::paths;
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum Format {
     Gif,
     Mp4,
+    /// Single still-image output. The actual encoder + extension is
+    /// driven by `Preset.image_codec` (PNG / JPEG / WebP / AVIF).
+    /// Width/height/crop/greyscale all apply; fps + audio fields are
+    /// ignored.
+    Image,
+}
+
+/// Image codec selector for `Format::Image`. Each codec has its own
+/// quality knob with its own native scale — the UI shows different
+/// labels and ranges per codec, and `Preset.image_quality` stores the
+/// raw native value so changing codec doesn't silently re-interpret
+/// the number under a different scale.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ImageCodec {
+    /// Lossless. `image_quality` 0-9 = libpng compression level
+    /// (0 fastest/largest, 9 slowest/smallest).
+    Png,
+    /// Lossy. `image_quality` 1-100 maps to ffmpeg's `-q:v` 31-2
+    /// internally (lower q:v = better quality).
+    Jpeg,
+    /// Lossy by default. `image_quality` 0-100 passes directly to
+    /// libwebp's `-quality`.
+    Webp,
+    /// Lossy via AV1 still-image. `image_quality` 0-63 = `-crf`
+    /// (lower = better quality / larger file).
+    Avif,
+}
+
+impl ImageCodec {
+    /// Filename extension for the encoded output.
+    pub fn ext(&self) -> &'static str {
+        match self {
+            ImageCodec::Png => "png",
+            ImageCodec::Jpeg => "jpg",
+            ImageCodec::Webp => "webp",
+            ImageCodec::Avif => "avif",
+        }
+    }
+
+    /// A reasonable starting quality value for fresh user-created
+    /// presets when the field is left blank.
+    pub fn default_quality(&self) -> u32 {
+        match self {
+            ImageCodec::Png => 6,
+            ImageCodec::Jpeg => 85,
+            ImageCodec::Webp => 80,
+            ImageCodec::Avif => 24,
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -74,6 +124,27 @@ pub struct Preset {
     // target maximum output size in MB (auto-adjusts quality/width)
     #[serde(default)]
     pub target_max_mb: Option<u32>,
+
+    // ---- Image-format fields (only meaningful when format == Image) ----
+    /// Which image encoder to use. Determines output extension and
+    /// the meaning of `image_quality`. `None` is treated as PNG by the
+    /// encoder, which keeps deserialisation tolerant of older
+    /// presets.json files written before this field existed.
+    #[serde(default)]
+    pub image_codec: Option<ImageCodec>,
+    /// Quality / compression level for the chosen image codec, in the
+    /// codec's NATIVE scale (see `ImageCodec` doc for ranges). Storing
+    /// in native form avoids silent re-interpretation if the user
+    /// changes codec — the value either still makes sense in the new
+    /// codec's range or gets clamped at encode time.
+    #[serde(default)]
+    pub image_quality: Option<u32>,
+    /// Strip EXIF / GPS / camera-serial metadata from the output.
+    /// On by default for shipped image presets — most "send this
+    /// image" workflows want privacy-preserving output. Implemented
+    /// via ffmpeg's `-map_metadata -1`.
+    #[serde(default)]
+    pub strip_metadata: Option<bool>,
 
     /// Desaturate to greyscale. Independent of format — works on both
     /// GIF and MP4 outputs. When true, adds `format=gray` to the filter

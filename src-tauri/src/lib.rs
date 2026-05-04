@@ -69,12 +69,37 @@ pub fn run() {
     // was up). Doing the IPC ourselves up here makes secondaries exit
     // cleanly with no UI side effects whatsoever.
     //
+    // We ALSO start the IPC listener thread right here — before Tauri
+    // Builder runs. A multi-file right-click via the classic context
+    // menu fires N offspring.exe processes in rapid succession; the
+    // secondaries that race ahead of the primary's setup() would
+    // otherwise find no pipe to forward to and silently drop their
+    // argv after the connect-retry budget expired. The listener
+    // queues incoming argv into an mpsc channel; the primary's setup()
+    // spins up a processor thread that drains the channel and feeds
+    // each forwarded invocation through `merge_pending` + the debounce
+    // clock. Bridging via the channel decouples "I can accept argv
+    // now" (early, no AppHandle needed) from "I can dispatch argv
+    // through Tauri state" (only after setup() runs).
+    //
     // `_primary_guard` must stay in scope for the rest of run() — it
     // owns the mutex handle that proves we're the primary.
+    #[cfg(windows)]
+    let (argv_tx, argv_rx) = std::sync::mpsc::channel::<Vec<String>>();
+    #[cfg(windows)]
+    let argv_rx = std::sync::Mutex::new(Some(argv_rx));
     #[cfg(windows)]
     let _primary_guard = match single_instance::try_become_primary() {
         Ok(Some(guard)) => {
             dlog!("singleton: acquired primary mutex");
+            // Start the listener IMMEDIATELY. Anything that arrives
+            // before setup() runs is buffered in the channel and
+            // drained when the processor thread comes up.
+            let argv_tx_for_listener = argv_tx.clone();
+            single_instance::start_listener(move |argv| {
+                let _ = argv_tx_for_listener.send(argv);
+            });
+            dlog!("singleton: pipe listener spawned");
             Some(guard)
         }
         Ok(None) => {
@@ -93,6 +118,12 @@ pub fn run() {
             None
         }
     };
+    // Drop the original Sender so the receiver's iterator terminates
+    // when no listener clones remain. (We don't actually rely on
+    // termination — the listener thread runs forever — but cleaning up
+    // the unused clone is good hygiene.)
+    #[cfg(windows)]
+    drop(argv_tx);
 
     // Activity clock: updated whenever a new CLI-arg bundle arrives
     // (primary start OR secondary instance forwarded by the plugin).
@@ -170,55 +201,81 @@ pub fn run() {
             merge_pending(&handle, initial_command.clone());
             *last_arrival.lock().unwrap() = Instant::now();
 
-            // Start the IPC listener that receives forwarded argv from
-            // secondaries. Mirrors the per-arrival logic that used to
-            // live in the `tauri-plugin-single-instance` callback —
+            // Drain the IPC channel started before Tauri Builder ran.
+            // The listener has been buffering argv from secondaries
+            // since the moment we acquired the mutex; this thread
+            // reads them in arrival order and applies the same logic
+            // that used to live inline in the listener callback:
             // new-batch detection, CLI parse, merge_pending, arrival
-            // clock update — except now it runs in a thread that the
-            // primary spawned itself, while secondaries never even
-            // reach Tauri.
+            // clock update.
             #[cfg(windows)]
             {
                 let handle_for_listener = handle.clone();
                 let last_arrival_for_listener = last_arrival.clone();
                 let last_dispatch_for_listener = last_dispatch.clone();
-                single_instance::start_listener(move |argv| {
-                    dlog!("ipc listener: secondary argv={:?}", debug_log::redact_argv(&argv));
+                // Take ownership of the receiver — we hold it in an
+                // Option<Mutex> at the run() level so the move closure
+                // can extract it once. (mpsc::Receiver is !Sync so we
+                // can't share it with other threads anyway.)
+                let argv_rx = argv_rx
+                    .lock()
+                    .unwrap()
+                    .take()
+                    .expect("argv receiver should still be available");
+                std::thread::spawn(move || {
+                    dlog!("ipc processor thread spawned");
+                    for argv in argv_rx {
+                        dlog!("ipc processor: secondary argv={:?}", debug_log::redact_argv(&argv));
 
-                    // New-batch detection: if the last window dispatch
-                    // was more than BATCH_DEBOUNCE * 2 ago, this arrival
-                    // begins a fresh user action (a new right-click,
-                    // not a still-trickling-in multi-file batch). Clear
-                    // stale pending state so the previous batch's files
-                    // don't ride along.
-                    let is_new_batch = {
-                        let guard = last_dispatch_for_listener.lock().unwrap();
-                        match *guard {
-                            Some(d) => d.elapsed() > BATCH_DEBOUNCE * 2,
-                            None => false,
+                        // New-batch detection: if the last window
+                        // dispatch was more than BATCH_DEBOUNCE * 2
+                        // ago, this arrival begins a fresh user action
+                        // (a new right-click, not a still-trickling-in
+                        // multi-file batch). Clear stale pending state
+                        // so the previous batch's files don't ride
+                        // along.
+                        let is_new_batch = {
+                            let guard = last_dispatch_for_listener.lock().unwrap();
+                            match *guard {
+                                Some(d) => d.elapsed() > BATCH_DEBOUNCE * 2,
+                                None => false,
+                            }
+                        };
+                        if is_new_batch {
+                            dlog!("  new batch detected; clearing stale pending state");
+                            if let Some(state) = handle_for_listener.try_state::<PendingState>() {
+                                state.files.lock().unwrap().clear();
+                                *state.preset_id.lock().unwrap() = None;
+                                *state.merge.lock().unwrap() = false;
+                                *state.compare.lock().unwrap() = false;
+                                *state.grayscale.lock().unwrap() = false;
+                                *state.overlay.lock().unwrap() = false;
+                                *state.trim_dialog.lock().unwrap() = false;
+                            }
+                            // Critical: zero `last_dispatch` so the very next
+                            // arrival in this same batch (typically tens of
+                            // milliseconds later, well within
+                            // BATCH_DEBOUNCE * 2) doesn't ALSO see the stale
+                            // dispatch timestamp and re-trigger the clear-
+                            // state path. Without this, every multi-file
+                            // batch after the first one collapses to its
+                            // LAST file because each subsequent arrival
+                            // wipes the files added by its predecessors.
+                            // The next dispatch (the debounce thread) will
+                            // re-set this to `Some(now)` after the window
+                            // opens.
+                            *last_dispatch_for_listener.lock().unwrap() = None;
                         }
-                    };
-                    if is_new_batch {
-                        dlog!("  new batch detected; clearing stale pending state");
-                        if let Some(state) = handle_for_listener.try_state::<PendingState>() {
-                            state.files.lock().unwrap().clear();
-                            *state.preset_id.lock().unwrap() = None;
-                            *state.merge.lock().unwrap() = false;
-                            *state.compare.lock().unwrap() = false;
-                            *state.grayscale.lock().unwrap() = false;
-                            *state.overlay.lock().unwrap() = false;
-                            *state.trim_dialog.lock().unwrap() = false;
-                        }
-                    }
 
-                    match Cli::try_parse_from(&argv) {
-                        Ok(cli) => {
-                            dlog!("  secondary parsed; command={:?}", cli.command);
-                            merge_pending(&handle_for_listener, cli.command);
-                            *last_arrival_for_listener.lock().unwrap() = Instant::now();
-                        }
-                        Err(e) => {
-                            dlog!("  secondary PARSE FAILED: {}", e);
+                        match Cli::try_parse_from(&argv) {
+                            Ok(cli) => {
+                                dlog!("  secondary parsed; command={:?}", cli.command);
+                                merge_pending(&handle_for_listener, cli.command);
+                                *last_arrival_for_listener.lock().unwrap() = Instant::now();
+                            }
+                            Err(e) => {
+                                dlog!("  secondary PARSE FAILED: {}", e);
+                            }
                         }
                     }
                 });

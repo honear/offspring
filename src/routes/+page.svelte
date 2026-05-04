@@ -711,7 +711,7 @@
   <header class="topbar">
     <div class="brand">
       <h1>Offspring</h1>
-      <span class="tiny">Right-click convert tools powered by FFmpeg <br> Developed by Second March</span>
+      <span class="tiny">Right-click tools powered by FFmpeg <br> Developed by Second March</span>
     </div>
 
     <nav class="tabs">

@@ -176,11 +176,44 @@ pub fn output_path(input: &EncodeInput, preset: &Preset) -> PathBuf {
     let ext = match preset.format {
         Format::Gif => "gif",
         Format::Mp4 => "mp4",
+        // Image: extension comes from the chosen codec. None falls
+        // back to PNG — same as the encode branch's default.
+        Format::Image => preset
+            .image_codec
+            .as_ref()
+            .map(|c| c.ext())
+            .unwrap_or("png"),
     };
     let base = input
         .output_dir()
         .join(format!("{}{}.{ext}", input.output_stem(), preset.suffix));
     unique_output_path(&base)
+}
+
+/// Standard image extensions Offspring recognises as "still image
+/// input". Used to:
+///   * Refuse video-format presets on image inputs with a clear error
+///     (rather than letting ffmpeg produce nonsense).
+///   * Refuse Trim/Merge tool invocations on image-only selections.
+///   * Pick the right encode pipeline in `encode_file` and the tools.
+///
+/// Lowercase comparison; lives next to the format dispatch in
+/// `encode_file` so the list stays close to the code that depends on it.
+pub fn is_image_path(path: &Path) -> bool {
+    matches!(
+        path.extension()
+            .and_then(|e| e.to_str())
+            .map(|s| s.to_ascii_lowercase())
+            .as_deref(),
+        Some("png")
+            | Some("jpg")
+            | Some("jpeg")
+            | Some("webp")
+            | Some("avif")
+            | Some("bmp")
+            | Some("tif")
+            | Some("tiff")
+    )
 }
 
 /// If `path` doesn't exist, return it. Otherwise return the first
@@ -739,6 +772,144 @@ pub fn encode_file(
             cmd.args(["-progress", "pipe:1"]).arg(&out);
             run_with_progress(cmd, duration_s, file_index, total_files, &input_display, "encode", &mut on_progress)?;
         }
+        Format::Image => {
+            // Image preset on a non-image input is almost always user
+            // error — invoking a "JPEG 85%" preset on a video would
+            // either fail in ffmpeg or quietly produce a one-frame
+            // poster, neither of which is clearly desirable. We refuse
+            // up front rather than guess.
+            //
+            // (Future enhancement: a "Poster from video" preset that
+            // explicitly extracts the first frame. That can ship as a
+            // standalone preset/tool when there's a real demand.)
+            if let EncodeInput::File(p) = input {
+                if !is_image_path(p) {
+                    bail!(
+                        "This preset outputs a still image, but the input \
+                         '{}' is not an image. Use a video preset (MP4 / GIF) \
+                         for video inputs.",
+                        p.display()
+                    );
+                }
+            }
+
+            let codec = preset.image_codec.clone().unwrap_or(crate::presets::ImageCodec::Png);
+            let strip_meta = preset.strip_metadata.unwrap_or(false);
+            let q_native = preset.image_quality.unwrap_or(codec.default_quality());
+
+            // Reuse the video filter-chain builder for resize/crop/
+            // greyscale/timecode — the same -vf graph works for stills
+            // (every "video" filter in our chain is a per-frame op
+            // that has no opinion about whether there's only one frame).
+            let filter = build_filter_chain(preset);
+
+            on_progress(ProgressEvent {
+                file_index,
+                total_files,
+                input: input_display.clone(),
+                stage: "encode".into(),
+                percent: None,
+                message: Some(format!("Encoding {}", codec.ext().to_ascii_uppercase())),
+            });
+
+            let mut cmd = Command::new(ffmpeg);
+            cmd.args(["-v", &verbosity, "-y", "-hide_banner"]);
+            for a in input.input_args() {
+                cmd.arg(a);
+            }
+            if !filter.is_empty() {
+                cmd.args(["-vf", &filter]);
+            }
+            // -frames:v 1 caps the output to a single frame. Belt-and-
+            // suspenders: still-image inputs already imply one frame,
+            // but if a user ever points an image preset at an image
+            // sequence (via the Sequence tool) this prevents a
+            // multi-frame APNG/AVIS from being silently produced.
+            cmd.args(["-frames:v", "1"]);
+
+            match codec {
+                crate::presets::ImageCodec::Png => {
+                    // libpng. Compression level 0-9; 0 is fastest +
+                    // largest, 9 is slowest + smallest. Quality is
+                    // lossless either way.
+                    let level = q_native.min(9).to_string();
+                    cmd.args(["-c:v", "png", "-compression_level", &level]);
+                }
+                crate::presets::ImageCodec::Jpeg => {
+                    // mjpeg encoder. Native q:v scale is 2-31 with
+                    // LOWER = better. We expose 1-100 in the UI for
+                    // photographer familiarity, then map back here.
+                    // The mapping is linear over 31..2 — q_ui=100 →
+                    // q:v=2, q_ui=1 → q:v=31. Clamp into the valid
+                    // range so out-of-range stored values still encode.
+                    let q_ui = q_native.clamp(1, 100) as f32;
+                    let qv = (31.0 - (q_ui - 1.0) * 29.0 / 99.0).round() as u32;
+                    let qv = qv.clamp(2, 31).to_string();
+                    // pix_fmt yuvj420p forces full-range JPEG, which is
+                    // what almost every viewer expects from a .jpg.
+                    // libavcodec's mjpeg defaults to limited range
+                    // otherwise and produces washed-out output on some
+                    // decoders.
+                    cmd.args([
+                        "-c:v", "mjpeg",
+                        "-q:v", &qv,
+                        "-pix_fmt", "yuvj420p",
+                    ]);
+                }
+                crate::presets::ImageCodec::Webp => {
+                    // libwebp. Quality 0-100 native, no remapping.
+                    let q = q_native.min(100).to_string();
+                    cmd.args([
+                        "-c:v", "libwebp",
+                        "-quality", &q,
+                        // Disable -lossless so quality has effect; we
+                        // could expose lossless WebP via a future
+                        // boolean if anyone asks.
+                        "-lossless", "0",
+                    ]);
+                }
+                crate::presets::ImageCodec::Avif => {
+                    // libaom-av1 still-image. CRF 0-63 native, lower=better.
+                    let crf = q_native.min(63).to_string();
+                    cmd.args([
+                        "-c:v", "libaom-av1",
+                        "-crf", &crf,
+                        // still-picture flag tells the encoder this is
+                        // a one-frame stream and to write the AVIF
+                        // sequence header accordingly. Without it some
+                        // decoders (Photos.app on iOS, certain CDNs)
+                        // refuse to display the file.
+                        "-still-picture", "1",
+                    ]);
+                }
+            }
+
+            // Strip metadata (EXIF / GPS / camera serial) when the
+            // preset asks for it. -map_metadata -1 drops the global
+            // metadata block; for most image-codec containers that's
+            // sufficient. JPEG also has the per-stream APP1 marker
+            // which mjpeg's encoder strips by default in this config.
+            if strip_meta {
+                cmd.args(["-map_metadata", "-1"]);
+            }
+
+            cmd.arg(&out);
+            // run_with_progress is overkill for a one-frame encode
+            // (no `out_time_ms` to scrub against), but it gives us
+            // consistent error handling and process spawning. The
+            // progress bar will jump from "encoding" straight to
+            // "done" without intermediate ticks, which is fine for
+            // sub-second encodes.
+            run_with_progress(
+                cmd,
+                None,
+                file_index,
+                total_files,
+                &input_display,
+                "encode",
+                &mut on_progress,
+            )?;
+        }
     }
 
     on_progress(ProgressEvent {
@@ -1233,6 +1404,9 @@ pub fn derive_merge_preset(ffmpeg: &Path, first: &Path) -> Preset {
         audio_bitrate: Some("128k".into()),
         use_cuda: Some(false),
         target_max_mb: None,
+        image_codec: None,
+        image_quality: None,
+        strip_metadata: None,
         grayscale: None,
         timecode: None,
         guides: None,
@@ -1247,19 +1421,71 @@ pub fn derive_merge_preset(ffmpeg: &Path, first: &Path) -> Preset {
 /// from ffprobe; quality knobs from the same "looks right" baseline the
 /// Merge tool uses (CRF 23 / medium for MP4, 128-color bayer for GIF).
 ///
+/// Image inputs (PNG / JPEG / WebP / AVIF / BMP / TIFF) take a
+/// dedicated image branch — output keeps the same codec as the input
+/// so a JPEG → desaturated JPEG, a PNG → desaturated PNG, etc.
+///
 /// Suffix is `_gray` so the output lands next to the source without
 /// overwriting it: `<stem>_gray.<ext>`.
 pub fn derive_grayscale_preset(ffmpeg: &Path, input: &Path) -> Preset {
-    use crate::presets::{Dither, Format};
+    use crate::presets::{Dither, Format, ImageCodec};
 
     let ext = input
         .extension()
         .and_then(|e| e.to_str())
         .unwrap_or("mp4")
         .to_ascii_lowercase();
-    let format = if ext == "gif" { Format::Gif } else { Format::Mp4 };
+
+    // Image branch: greyscale a still image. We mirror the input's
+    // codec so the user gets back the same file type they handed in
+    // (a JPEG → JPEG, a PNG → PNG). For obscure formats we don't have
+    // a native ImageCodec for (BMP, TIFF), fall back to PNG so we at
+    // least produce a lossless output.
+    if is_image_path(input) {
+        let codec = match ext.as_str() {
+            "jpg" | "jpeg" => ImageCodec::Jpeg,
+            "webp" => ImageCodec::Webp,
+            "avif" => ImageCodec::Avif,
+            // png, bmp, tif, tiff — anything else lands here.
+            _ => ImageCodec::Png,
+        };
+        return Preset {
+            id: "__grayscale__".into(),
+            name: "Greyscale".into(),
+            enabled: true,
+            format: Format::Image,
+            suffix: "_gray".into(),
+            width: None,
+            height: None,
+            fps: None,
+            crop: None,
+            palette_colors: None,
+            dither: None,
+            bayer_scale: None,
+            crf: None,
+            preset_speed: None,
+            video_bitrate: None,
+            audio_bitrate: None,
+            use_cuda: None,
+            target_max_mb: None,
+            image_codec: Some(codec.clone()),
+            image_quality: Some(codec.default_quality()),
+            // Preserve user's original metadata on greyscale — this is
+            // a "transform an image" operation, not a "share-ready"
+            // operation. Image presets the user creates explicitly
+            // can opt into stripping; the Greyscale TOOL leaves it.
+            strip_metadata: Some(false),
+            grayscale: Some(true),
+            timecode: None,
+            guides: None,
+            overlay: None,
+            icon: None,
+            order: 0,
+        };
+    }
 
     let probe = probe_video(ffmpeg, input);
+    let format = if ext == "gif" { Format::Gif } else { Format::Mp4 };
 
     Preset {
         id: "__grayscale__".into(),
@@ -1280,6 +1506,9 @@ pub fn derive_grayscale_preset(ffmpeg: &Path, input: &Path) -> Preset {
         audio_bitrate: Some("128k".into()),
         use_cuda: Some(false),
         target_max_mb: None,
+        image_codec: None,
+        image_quality: None,
+        strip_metadata: None,
         grayscale: Some(true),
         timecode: None,
         guides: None,
@@ -1292,16 +1521,59 @@ pub fn derive_grayscale_preset(ffmpeg: &Path, input: &Path) -> Preset {
 /// Build an ad-hoc [`Preset`] for the Overlay tool. Dims are left None
 /// so no scale filter runs — the overlay filters are
 /// layered onto the source at its native size. Suffix `_overlay`.
+///
+/// Image inputs go through a dedicated image branch with codec
+/// matched to the input (JPEG → JPEG, PNG → PNG, etc.) so overlay
+/// burns into a still image of the same type rather than an
+/// unexpected video clip.
 pub fn derive_overlay_preset(ffmpeg: &Path, input: &Path, cfg: OverlayConfig) -> Preset {
-    use crate::presets::{Dither, Format};
+    use crate::presets::{Dither, Format, ImageCodec};
 
     let ext = input
         .extension()
         .and_then(|e| e.to_str())
         .unwrap_or("mp4")
         .to_ascii_lowercase();
-    let format = if ext == "gif" { Format::Gif } else { Format::Mp4 };
 
+    if is_image_path(input) {
+        let codec = match ext.as_str() {
+            "jpg" | "jpeg" => ImageCodec::Jpeg,
+            "webp" => ImageCodec::Webp,
+            "avif" => ImageCodec::Avif,
+            _ => ImageCodec::Png,
+        };
+        return Preset {
+            id: "__overlay__".into(),
+            name: "Overlay".into(),
+            enabled: true,
+            format: Format::Image,
+            suffix: "_overlay".into(),
+            width: None,
+            height: None,
+            fps: None,
+            crop: None,
+            palette_colors: None,
+            dither: None,
+            bayer_scale: None,
+            crf: None,
+            preset_speed: None,
+            video_bitrate: None,
+            audio_bitrate: None,
+            use_cuda: None,
+            target_max_mb: None,
+            image_codec: Some(codec.clone()),
+            image_quality: Some(codec.default_quality()),
+            strip_metadata: Some(false),
+            grayscale: None,
+            timecode: None,
+            guides: None,
+            overlay: Some(cfg),
+            icon: None,
+            order: 0,
+        };
+    }
+
+    let format = if ext == "gif" { Format::Gif } else { Format::Mp4 };
     let probe = probe_video(ffmpeg, input);
 
     Preset {
@@ -1323,6 +1595,9 @@ pub fn derive_overlay_preset(ffmpeg: &Path, input: &Path, cfg: OverlayConfig) ->
         audio_bitrate: Some("128k".into()),
         use_cuda: Some(false),
         target_max_mb: None,
+        image_codec: None,
+        image_quality: None,
+        strip_metadata: None,
         grayscale: None,
         timecode: None,
         guides: None,
@@ -1535,6 +1810,16 @@ pub fn encode_trim_files(
 ) -> Result<()> {
     if files.is_empty() {
         bail!("Trim needs at least one file");
+    }
+    // Trim is intrinsically a video operation — there are no frames
+    // to trim from a still image. Refuse with a clear message rather
+    // than letting ffmpeg produce a 0-frame file.
+    if files.iter().all(|p| is_image_path(p)) {
+        bail!(
+            "Trim only works on videos and animated GIFs. Still images \
+             have no frames to remove. Use the Custom dialog or an \
+             image preset to re-encode them."
+        );
     }
     let total = files.len();
     let verbosity = settings.verbosity.clone().unwrap_or_else(|| "warning".into());
@@ -1789,6 +2074,12 @@ pub fn encode_trim_files(
 /// its fps so hstack sees uniform streams. Output format matches the
 /// first file's extension (mp4 or gif). Audio is dropped — A/B review
 /// is a visual-only workflow.
+///
+/// When ALL inputs are still images, we hand off to the image-stack
+/// branch which produces a single still output of matching format
+/// (PNG → PNG, JPEG → JPEG, etc.). Mixed image+video inputs go through
+/// the video path and any image is treated as a one-frame clip — odd
+/// but well-defined and rarely hit in practice.
 pub fn encode_compare_files(
     ffmpeg: &Path,
     files: &[PathBuf],
@@ -1805,6 +2096,13 @@ pub fn encode_compare_files(
         .unwrap_or("mp4")
         .to_ascii_lowercase();
     let is_gif = ext == "gif";
+
+    // All-image branch: stack N stills into one still. Skips the
+    // fps-normalization, duration tracking, and palette logic — those
+    // are all video concerns. Handles its own output naming + emits.
+    if files.iter().all(|p| is_image_path(p)) {
+        return encode_compare_images(ffmpeg, files, settings, on_progress);
+    }
 
     let probe = probe_video(ffmpeg, first);
     let height = probe.height.unwrap_or(720).max(120);
@@ -1971,6 +2269,139 @@ pub fn encode_compare_files(
             &mut on_progress,
         )?;
     }
+
+    on_progress(ProgressEvent {
+        file_index,
+        total_files,
+        input: input_display,
+        stage: "done".into(),
+        percent: Some(1.0),
+        message: Some(out.display().to_string()),
+    });
+    Ok(out)
+}
+
+/// Image-only Compare: stack N stills horizontally into one still.
+/// Output format matches the first input's codec (JPEG → JPEG, PNG →
+/// PNG, etc.). Falls back to PNG for unrecognised extensions
+/// (BMP/TIFF) so we always produce something the user can open.
+///
+/// Skips everything the video path needs (fps normalization, duration
+/// scrubbing, palette generation) — for stills they'd be either
+/// useless or wrong.
+fn encode_compare_images(
+    ffmpeg: &Path,
+    files: &[PathBuf],
+    settings: &Settings,
+    mut on_progress: impl FnMut(ProgressEvent),
+) -> Result<PathBuf> {
+    use crate::presets::ImageCodec;
+
+    let first = &files[0];
+    let n = files.len();
+    let probe = probe_video(ffmpeg, first);
+    // Pad height up to a sane minimum so very small inputs don't
+    // produce a strip narrower than the file-format demands.
+    let height = probe.height.unwrap_or(720).max(120);
+    let stem = first
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("output");
+
+    // Pick output codec from the first input's extension.
+    let first_ext = first
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("png")
+        .to_ascii_lowercase();
+    let codec = match first_ext.as_str() {
+        "jpg" | "jpeg" => ImageCodec::Jpeg,
+        "webp" => ImageCodec::Webp,
+        "avif" => ImageCodec::Avif,
+        // png, bmp, tif, tiff — anything else.
+        _ => ImageCodec::Png,
+    };
+    let out_ext = codec.ext();
+
+    // Build the same scale+hstack graph as the video path, minus the
+    // fps filter (no time domain on stills) and minus setsar (image
+    // sources have square pixels by default).
+    let mut norm = String::new();
+    for i in 0..n {
+        if i > 0 {
+            norm.push(';');
+        }
+        norm.push_str(&format!("[{i}:v]scale=-2:{height}:flags=lanczos[v{i}]"));
+    }
+    let mut stacked = String::new();
+    for i in 0..n {
+        stacked.push_str(&format!("[v{i}]"));
+    }
+    stacked.push_str(&format!("hstack=inputs={n}"));
+
+    let base = first
+        .parent()
+        .unwrap_or(Path::new("."))
+        .to_path_buf()
+        .join(format!("{stem}_compare.{out_ext}"));
+    let out = unique_output_path(&base);
+
+    let verbosity = settings.verbosity.clone().unwrap_or_else(|| "warning".into());
+    let input_display = format!("compare: {stem}");
+    let total_files = 1usize;
+    let file_index = 1usize;
+
+    on_progress(ProgressEvent {
+        file_index,
+        total_files,
+        input: input_display.clone(),
+        stage: "encode".into(),
+        percent: None,
+        message: Some(format!(
+            "Stacking {n} images → {}",
+            out_ext.to_ascii_uppercase()
+        )),
+    });
+
+    let mut cmd = Command::new(ffmpeg);
+    cmd.args(["-v", &verbosity, "-y", "-hide_banner"]);
+    for f in files {
+        cmd.arg("-i").arg(f);
+    }
+    let filter = format!("{norm};{stacked}[vh]");
+    cmd.args(["-filter_complex", &filter])
+        .args(["-map", "[vh]"])
+        .args(["-frames:v", "1"]);
+
+    // Per-codec output args, matching the encode_file image branch's
+    // sensible defaults. We DO NOT pull from any user preset here —
+    // Compare is a tool, not a preset, so it uses fixed quality.
+    match codec {
+        ImageCodec::Png => {
+            cmd.args(["-c:v", "png", "-compression_level", "6"]);
+        }
+        ImageCodec::Jpeg => {
+            // q:v 3 ≈ "high quality" (~ UI 90 on the 1-100 scale).
+            cmd.args(["-c:v", "mjpeg", "-q:v", "3", "-pix_fmt", "yuvj420p"]);
+        }
+        ImageCodec::Webp => {
+            cmd.args(["-c:v", "libwebp", "-quality", "85", "-lossless", "0"]);
+        }
+        ImageCodec::Avif => {
+            cmd.args(["-c:v", "libaom-av1", "-crf", "24", "-still-picture", "1"]);
+        }
+    }
+
+    cmd.arg(&out);
+    run_with_progress(
+        cmd,
+        None,
+        file_index,
+        total_files,
+        &input_display,
+        "encode",
+        &mut on_progress,
+    )?;
 
     on_progress(ProgressEvent {
         file_index,

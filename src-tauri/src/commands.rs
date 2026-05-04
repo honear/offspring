@@ -241,6 +241,22 @@ pub fn encode_merge(
     if files.len() < 2 {
         return Err("Merge needs at least two files".into());
     }
+    // Refuse image-only selections. Concatenating stills isn't well-
+    // defined (strip? grid? animation?) and is best left to the
+    // Compare tool (horizontal stack) or future dedicated tools. If
+    // the selection mixes images and videos we let it through — the
+    // video path can handle stills as one-frame inputs.
+    if files
+        .iter()
+        .all(|f| ffmpeg::is_image_path(std::path::Path::new(f)))
+    {
+        return Err(
+            "Merge concatenates videos in time, which doesn't apply to \
+             still images. Try the Compare tool to stack images side-by-\
+             side instead."
+                .into(),
+        );
+    }
     let settings = presets::load_settings().unwrap_or_default();
     let ffmpeg_path = ffmpeg::resolve_ffmpeg(&settings).map_err(|e| e.to_string())?;
 
