@@ -29,7 +29,11 @@ const BATCH_DEBOUNCE: Duration = Duration::from_millis(500);
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let raw_argv: Vec<String> = std::env::args().collect();
-    dlog!("run() enter; argv={:?}", raw_argv);
+    // Redact file paths in the log dump — argv from a right-click drops
+    // the absolute paths of every selected file, which is more
+    // information than the debug log should retain. `redact_argv` keeps
+    // the verb names and flags but collapses paths to `…/<filename>`.
+    dlog!("run() enter; argv={:?}", debug_log::redact_argv(&raw_argv));
 
     let args = Cli::parse();
     dlog!("CLI parsed; command={:?}", args.command);
@@ -179,7 +183,7 @@ pub fn run() {
                 let last_arrival_for_listener = last_arrival.clone();
                 let last_dispatch_for_listener = last_dispatch.clone();
                 single_instance::start_listener(move |argv| {
-                    dlog!("ipc listener: secondary argv={:?}", argv);
+                    dlog!("ipc listener: secondary argv={:?}", debug_log::redact_argv(&argv));
 
                     // New-batch detection: if the last window dispatch
                     // was more than BATCH_DEBOUNCE * 2 ago, this arrival

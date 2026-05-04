@@ -26,3 +26,10 @@ vite.config.ts.timestamp-*
 /DESIGN.md
 /.claude/
 /examples/
+
+# Minisign signing material. The private key must never enter the repo
+# under any circumstances — losing it would let an attacker impersonate
+# the maintainer once the pubkey is pinned in updates.rs. The public key
+# file is also kept local-only because its canonical home is the
+# `UPDATE_MINISIGN_PUBKEY` constant in src-tauri/src/updates.rs.
+/installer/.minisign/

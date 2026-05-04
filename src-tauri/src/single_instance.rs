@@ -28,6 +28,30 @@
 //! other applications, and live in the `Local\` namespace (not
 //! `Global\`) so each Windows user session gets its own primary.
 //!
+//! ## Threat model for the pipe
+//!
+//!   * **Network attacker.** Blocked by `PIPE_REJECT_REMOTE_CLIENTS` —
+//!     CreateNamedPipeW refuses connections that originate from a
+//!     remote machine. The pipe is local-only by construction.
+//!
+//!   * **Cross-user local attacker.** Blocked by Windows' default
+//!     named-pipe DACL. With `lpSecurityAttributes = NULL`, Windows
+//!     applies a default that grants Full Control only to the creator
+//!     owner (us, the primary process), LocalSystem, and built-in
+//!     Administrators; everyone else gets Read at most, which is
+//!     useless for forwarding argv (forwarding requires Write).
+//!
+//!   * **Same-user local attacker (malware running as the user that
+//!     started Offspring).** Can write to the pipe and inject argv
+//!     that Offspring will then dispatch to FFmpeg. Out of scope per
+//!     `THREAT_MODEL.md` — at that point the attacker already owns
+//!     the user's session and can directly delete/encode files,
+//!     overwrite our binary, and modify our settings without going
+//!     through the pipe at all. We deliberately don't try to defend
+//!     this surface because doing so would be theatre.
+//!
+//! See also `THREAT_MODEL.md` in the repo root.
+//!
 //! We use raw FFI instead of the `windows` crate to keep the dep
 //! footprint small and avoid the feature-gating maze that crate's
 //! moved through over versions. The surface area we need is six

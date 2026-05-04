@@ -49,7 +49,15 @@ const TIMEOUT: Duration = Duration::from_secs(5);
 /// warning and proceed" — same effective behaviour as before this code
 /// existed, so flipping verification on is a strict tightening with no
 /// regressions for already-published releases.
-const UPDATE_MINISIGN_PUBKEY: &str = "";
+///
+/// Key fingerprint: `C8D647377413CFA8` (the eight-byte ID minisign
+/// embeds in every signature; visible in the `.minisig` sidecar's
+/// trusted-comment line and on the maintainer's pub-key file). Use it
+/// to spot-check that a signature claims to be from this key before
+/// running `minisign -Vm`. A mismatch in the wild would mean either
+/// a stale install pinned to an older key, or someone trying to
+/// substitute a different signing identity.
+const UPDATE_MINISIGN_PUBKEY: &str = "RWSozxN0N0fWyF2cXP0fC+q5Hg2kb2zW/ML+e+zItvm7A8BCXNLZunjr";
 
 #[derive(Serialize, Clone, Debug, Default)]
 pub struct UpdateInfo {
