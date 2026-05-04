@@ -8,6 +8,8 @@ mod integration;
 mod paths;
 mod presets;
 mod sequence;
+#[cfg(windows)]
+mod single_instance;
 mod updates;
 
 use clap::Parser;
@@ -52,6 +54,42 @@ pub fn run() {
         _ => {}
     }
 
+    // Singleton + argv forwarding (Windows only; Offspring is Windows-only
+    // but the cfg gates this so non-Windows dev builds still compile).
+    //
+    // Crucial: this runs BEFORE `tauri::Builder::default().run(...)` boots
+    // tao. Tauri's runtime creates a hidden message-pump window on
+    // Windows during init, which briefly flashed on screen for every
+    // secondary instance under the old `tauri-plugin-single-instance`
+    // arrangement (the plugin only short-circuited AFTER the runtime
+    // was up). Doing the IPC ourselves up here makes secondaries exit
+    // cleanly with no UI side effects whatsoever.
+    //
+    // `_primary_guard` must stay in scope for the rest of run() — it
+    // owns the mutex handle that proves we're the primary.
+    #[cfg(windows)]
+    let _primary_guard = match single_instance::try_become_primary() {
+        Ok(Some(guard)) => {
+            dlog!("singleton: acquired primary mutex");
+            Some(guard)
+        }
+        Ok(None) => {
+            dlog!("singleton: another primary exists; forwarding argv and exiting");
+            // Best effort — if forwarding fails (primary crashed mid-flight,
+            // pipe denied) we exit anyway. The user re-clicking will start
+            // a fresh primary because the dead primary's mutex auto-clears
+            // at process exit.
+            if let Err(e) = single_instance::forward_argv_to_primary(&raw_argv) {
+                dlog!("singleton: forward failed: {:#}", e);
+            }
+            std::process::exit(0);
+        }
+        Err(e) => {
+            dlog!("singleton: mutex check error: {:#}; degrading to primary", e);
+            None
+        }
+    };
+
     // Activity clock: updated whenever a new CLI-arg bundle arrives
     // (primary start OR secondary instance forwarded by the plugin).
     // The debounce watcher in setup() waits until this has been quiet
@@ -67,58 +105,6 @@ pub fn run() {
     let initial_command = args.command.clone();
 
     tauri::Builder::default()
-        // Single-instance must be registered first — the plugin hooks the
-        // secondary's entry point and short-circuits it before anything
-        // else runs. Without this, every right-clicked file would spawn
-        // its own offspring.exe + its own progress window (the root
-        // cause of "multi-select only processes one file" before v0.3.30).
-        .plugin(tauri_plugin_single_instance::init({
-            let last_arrival = last_arrival.clone();
-            let last_dispatch = last_dispatch.clone();
-            move |app, argv, _cwd| {
-                dlog!("single-instance callback: secondary argv={:?}", argv);
-
-                // New-batch detection: if the last window dispatch was
-                // more than BATCH_DEBOUNCE * 2 ago, assume this arrival
-                // begins a fresh user action (a new right-click, not a
-                // still-trickling-in multi-file batch). Clear stale
-                // pending state so the previous batch's files don't
-                // ride along.
-                let is_new_batch = {
-                    let guard = last_dispatch.lock().unwrap();
-                    match *guard {
-                        Some(d) => d.elapsed() > BATCH_DEBOUNCE * 2,
-                        None => false, // primary's first arrival — state already seeded by setup()
-                    }
-                };
-                if is_new_batch {
-                    dlog!("  new batch detected; clearing stale pending state");
-                    if let Some(state) = app.try_state::<PendingState>() {
-                        state.files.lock().unwrap().clear();
-                        *state.preset_id.lock().unwrap() = None;
-                        *state.merge.lock().unwrap() = false;
-                        *state.compare.lock().unwrap() = false;
-                        *state.grayscale.lock().unwrap() = false;
-                        *state.overlay.lock().unwrap() = false;
-                        *state.trim_dialog.lock().unwrap() = false;
-                    }
-                }
-
-                // Parse the secondary's argv using the same clap spec
-                // the primary used. `try_parse_from` tolerates malformed
-                // secondary calls (e.g. missing --id) without panicking.
-                match Cli::try_parse_from(&argv) {
-                    Ok(cli) => {
-                        dlog!("  secondary parsed; command={:?}", cli.command);
-                        merge_pending(app, cli.command);
-                        *last_arrival.lock().unwrap() = Instant::now();
-                    }
-                    Err(e) => {
-                        dlog!("  secondary PARSE FAILED: {}", e);
-                    }
-                }
-            }
-        }))
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .manage(PendingState::default())
@@ -175,10 +161,64 @@ pub fn run() {
 
             // Seed pending state with the primary's own command and start
             // the debounce clock. If this is a multi-file right-click,
-            // more args will land in merge_pending() via the
-            // single-instance callback before the window opens.
+            // more args will land via the single_instance listener
+            // (registered below) before the debounce fires.
             merge_pending(&handle, initial_command.clone());
             *last_arrival.lock().unwrap() = Instant::now();
+
+            // Start the IPC listener that receives forwarded argv from
+            // secondaries. Mirrors the per-arrival logic that used to
+            // live in the `tauri-plugin-single-instance` callback —
+            // new-batch detection, CLI parse, merge_pending, arrival
+            // clock update — except now it runs in a thread that the
+            // primary spawned itself, while secondaries never even
+            // reach Tauri.
+            #[cfg(windows)]
+            {
+                let handle_for_listener = handle.clone();
+                let last_arrival_for_listener = last_arrival.clone();
+                let last_dispatch_for_listener = last_dispatch.clone();
+                single_instance::start_listener(move |argv| {
+                    dlog!("ipc listener: secondary argv={:?}", argv);
+
+                    // New-batch detection: if the last window dispatch
+                    // was more than BATCH_DEBOUNCE * 2 ago, this arrival
+                    // begins a fresh user action (a new right-click,
+                    // not a still-trickling-in multi-file batch). Clear
+                    // stale pending state so the previous batch's files
+                    // don't ride along.
+                    let is_new_batch = {
+                        let guard = last_dispatch_for_listener.lock().unwrap();
+                        match *guard {
+                            Some(d) => d.elapsed() > BATCH_DEBOUNCE * 2,
+                            None => false,
+                        }
+                    };
+                    if is_new_batch {
+                        dlog!("  new batch detected; clearing stale pending state");
+                        if let Some(state) = handle_for_listener.try_state::<PendingState>() {
+                            state.files.lock().unwrap().clear();
+                            *state.preset_id.lock().unwrap() = None;
+                            *state.merge.lock().unwrap() = false;
+                            *state.compare.lock().unwrap() = false;
+                            *state.grayscale.lock().unwrap() = false;
+                            *state.overlay.lock().unwrap() = false;
+                            *state.trim_dialog.lock().unwrap() = false;
+                        }
+                    }
+
+                    match Cli::try_parse_from(&argv) {
+                        Ok(cli) => {
+                            dlog!("  secondary parsed; command={:?}", cli.command);
+                            merge_pending(&handle_for_listener, cli.command);
+                            *last_arrival_for_listener.lock().unwrap() = Instant::now();
+                        }
+                        Err(e) => {
+                            dlog!("  secondary PARSE FAILED: {}", e);
+                        }
+                    }
+                });
+            }
 
             // Long-lived debounce watcher: waits (cheap sleeps) for any
             // new CLI arrival newer than our last dispatch, then debounces

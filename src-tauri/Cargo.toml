@@ -1,6 +1,6 @@
 [package]
 name = "offspring"
-version = "0.3.42"
+version = "0.3.42-b0002"
 description = "Offspring — right-click convert videos/images with FFmpeg"
 authors = ["Second March"]
 edition = "2021"
@@ -16,13 +16,15 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = [] }
 tauri-plugin-opener = "2"
 tauri-plugin-dialog = "2"
-# Single-instance: Explorer's classic-menu nested sub-verbs only pass the
-# right-clicked file to each offspring.exe spawn, so a multi-file
-# selection actually fires N separate processes. This plugin routes them
-# all to the first instance; we accumulate their file args under a short
-# debounce and then process them as one batch (sequential presets,
-# single-pass merge/compare). See `run()` in lib.rs.
-tauri-plugin-single-instance = "2"
+# Single-instance + argv-forwarding IPC: Explorer's classic-menu
+# nested sub-verbs only pass the right-clicked file to each
+# offspring.exe spawn, so a multi-file selection actually fires N
+# separate processes. We hand-roll the singleton dance via Win32
+# named mutex + named pipe in `single_instance.rs` so secondaries
+# exit BEFORE Tauri/tao boot — `tauri-plugin-single-instance` checks
+# only after the runtime is up, which produced a brief flash of the
+# secondary's hidden message-pump window on screen. See `run()` in
+# lib.rs and `single_instance.rs`.
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 clap = { version = "4", features = ["derive"] }
