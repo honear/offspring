@@ -163,3 +163,24 @@ export function onUpdateDownload(
 ): Promise<UnlistenFn> {
   return listen<UpdateDownloadEvent>("update-download", (e) => fn(e.payload));
 }
+
+/** Resolve after WebView2 has had a chance to commit the next paint.
+ *
+ *  We open the encode-related windows with `.visible(false)` on the
+ *  Rust side and reveal them from the frontend so the user never sees
+ *  a blank-frame flash. But Svelte's `onMount` fires the moment the
+ *  DOM is built — Chromium-based WebView2 lags one or two frames
+ *  behind that before the pixels are actually on screen. Calling
+ *  `show()` straight from `onMount` therefore briefly reveals an
+ *  empty white window.
+ *
+ *  Two `requestAnimationFrame`s are the standard browser idiom: the
+ *  first lets style/layout settle, the second runs after the paint
+ *  has committed. Equivalent to "wait until the next frame is on
+ *  screen". 16-ish ms on a 60Hz display.
+ */
+export function afterFirstPaint(): Promise<void> {
+  return new Promise((resolve) => {
+    requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
+  });
+}

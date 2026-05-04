@@ -20,16 +20,17 @@
   let encoding = $state(false);
 
   onMount(async () => {
-    // Reveal the window now that Svelte is ready to render. The Rust
-    // side builds it hidden so the WebView2 first-paint delay doesn't
-    // show as a blank-frame flash. Right after the show() we run the
-    // focus dance that used to live in Rust: Explorer keeps the
-    // foreground when it spawns offspring.exe, so a fresh window ends
-    // up behind it. Briefly toggling always-on-top + set_focus moves
-    // the foreground to us; we drop always-on-top right away so the
-    // user can later put another window over the dialog if they want.
+    // Reveal the window after WebView2 has committed the first paint
+    // (see `afterFirstPaint` in `$lib/api` for the WHY). Right after
+    // the show() we run the focus dance that used to live in Rust:
+    // Explorer keeps the foreground when it spawns offspring.exe, so
+    // a fresh window ends up behind it. Briefly toggling
+    // always-on-top + set_focus moves the foreground to us; we drop
+    // always-on-top right away so the user can later put another
+    // window over the dialog if they want.
     const w = getCurrentWindow();
     try {
+      await api.afterFirstPaint();
       await w.show();
       await w.unminimize();
       await w.setAlwaysOnTop(true);
