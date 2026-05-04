@@ -152,6 +152,12 @@ pub fn sync(presets: &[Preset], settings: &Settings) -> Result<()> {
     if settings.tools.trim.enabled {
         write_nested_verb("84_trim", "Trim...", None, "trim")?;
     }
+    if settings.tools.invert.enabled {
+        write_nested_verb("85_invert", "Invert", None, "invert")?;
+    }
+    if settings.tools.make_square.enabled {
+        write_nested_verb("86_make_square", "Make Square", None, "make-square")?;
+    }
 
     // Trailing "Custom..." entry. 99_ keeps it at the bottom even if the
     // user somehow has 90+ presets (which would be unusual).

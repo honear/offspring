@@ -10,8 +10,8 @@
 ; Compile with the Inno Setup compiler (iscc.exe or the Inno Setup IDE).
 
 #define AppName      "Offspring"
-#define AppVersion   "0.3.46"
-#define AppVersionMsix "0.3.46.0"
+#define AppVersion   "0.3.47"
+#define AppVersionMsix "0.3.47.0"
 #define AppPublisher "Second March"
 #define AppExeName   "offspring.exe"
 #define AppId        "{{D8E5C6BC-5F10-4B29-A8A9-7D4D1A3B9C22}"

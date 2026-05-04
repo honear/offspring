@@ -300,6 +300,10 @@ pub struct ToolsSettings {
     pub overlay: OverlayTool,
     #[serde(default = "TrimTool::default")]
     pub trim: TrimTool,
+    #[serde(default = "InvertTool::default")]
+    pub invert: InvertTool,
+    #[serde(default = "MakeSquareTool::default")]
+    pub make_square: MakeSquareTool,
 }
 
 impl Default for ToolsSettings {
@@ -311,6 +315,8 @@ impl Default for ToolsSettings {
             compare: CompareTool::default(),
             overlay: OverlayTool::default(),
             trim: TrimTool::default(),
+            invert: InvertTool::default(),
+            make_square: MakeSquareTool::default(),
         }
     }
 }
@@ -407,6 +413,75 @@ pub struct TrimTool {
 impl Default for TrimTool {
     fn default() -> Self {
         Self { enabled: true }
+    }
+}
+
+/// Color/alpha invert tool. Image-only — refuses video inputs with a
+/// clear error. Uses ffmpeg's `negate` filter for the RGB invert; the
+/// alpha channel is preserved untouched so a transparent PNG with
+/// black opaque content comes out as the same shape rendered white.
+///
+/// `clamp` makes the output a strict 1-bit-per-channel result —
+/// every channel (including alpha if present) gets thresholded to
+/// either 0 or 255. Useful for cleaning up masks where the source
+/// has anti-aliased edges or compression artifacts.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct InvertTool {
+    pub enabled: bool,
+    /// Threshold every channel to {0, 255} after inverting. Off by
+    /// default — most users invert photos / soft masks where they
+    /// want to preserve gradients. On is what you want for binary
+    /// masks (alpha-channel masks, B/W layer masks).
+    #[serde(default)]
+    pub clamp: bool,
+}
+
+impl Default for InvertTool {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            clamp: false,
+        }
+    }
+}
+
+/// Make-Square tool. Pads the shorter edge of an image to match the
+/// longer one, producing a square output. Image-only — refuses video
+/// inputs.
+///
+/// `fill_mode` chooses what fills the new pixels:
+///   * `Transparent` — `pad` with `black@0`. Forces the output codec
+///     to one that supports alpha (PNG / WebP / AVIF). When the input
+///     is JPEG (no alpha), we emit PNG instead.
+///   * `EdgeColor` — sample the top-left pixel of the input via a
+///     short ffmpeg probe and use that as the pad color. Output keeps
+///     the input codec.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct MakeSquareTool {
+    pub enabled: bool,
+    #[serde(default)]
+    pub fill_mode: MakeSquareFillMode,
+}
+
+impl Default for MakeSquareTool {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            fill_mode: MakeSquareFillMode::Transparent,
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MakeSquareFillMode {
+    Transparent,
+    EdgeColor,
+}
+
+impl Default for MakeSquareFillMode {
+    fn default() -> Self {
+        Self::Transparent
     }
 }
 

@@ -190,7 +190,7 @@
       const toParam = search.get("to");
       const trimRemoveFrom = fromParam != null ? Math.max(0, parseInt(fromParam, 10) || 0) : null;
       const trimRemoveTo = toParam != null ? Math.max(0, parseInt(toParam, 10) || 0) : null;
-      const [f, presetId, customPreset, allPresets, mergeFlag, grayscaleFlag, compareFlag, overlayFlag] = await Promise.all([
+      const [f, presetId, customPreset, allPresets, mergeFlag, grayscaleFlag, compareFlag, overlayFlag, invertFlag, makeSquareFlag] = await Promise.all([
         api.getPendingFiles(),
         api.getPendingPresetId(),
         api.getPendingCustomPreset(),
@@ -199,12 +199,16 @@
         api.getPendingGrayscale(),
         api.getPendingCompare(),
         api.getPendingOverlay(),
+        api.getPendingInvert(),
+        api.getPendingMakeSquare(),
       ]);
       files = f;
       const isMerge = mergeFlag === true;
       const isGrayscale = grayscaleFlag === true;
       const isCompare = compareFlag === true;
       const isOverlay = overlayFlag === true;
+      const isInvert = invertFlag === true;
+      const isMakeSquare = makeSquareFlag === true;
       if (presetId) {
         preset = allPresets.find((p) => p.id === presetId);
       } else if (customPreset) {
@@ -219,7 +223,7 @@
       }
       // Tool paths derive their own settings from the inputs, so they
       // don't need a resolved preset.
-      const isTool = isMerge || isGrayscale || isCompare || isOverlay || isTrim;
+      const isTool = isMerge || isGrayscale || isCompare || isOverlay || isTrim || isInvert || isMakeSquare;
       if (!isTool && !preset) {
         errored = true;
         errorMsg = `No preset was resolved (presetId=${presetId ?? "null"}, customPreset=${customPreset ? "present" : "null"}). The shortcut may be stale.`;
@@ -249,7 +253,11 @@
               ? "starting compare"
               : isOverlay
                 ? "starting overlay"
-                : "starting encode";
+                : isInvert
+                  ? "starting invert"
+                  : isMakeSquare
+                    ? "starting make square"
+                    : "starting encode";
       armStallTimer();
       didStart = true;
       if (isTrim) {
@@ -274,6 +282,10 @@
         await api.encodeCompare(files);
       } else if (isOverlay) {
         await api.encodeOverlay(files);
+      } else if (isInvert) {
+        await api.encodeInvert(files);
+      } else if (isMakeSquare) {
+        await api.encodeMakeSquare(files);
       } else {
         await api.encode(files, preset!);
       }
@@ -287,7 +299,11 @@
               ? "stacking"
               : isOverlay
                 ? "overlaying"
-                : "encoding";
+                : isInvert
+                  ? "inverting"
+                  : isMakeSquare
+                    ? "making square"
+                    : "encoding";
     } catch (err) {
       // Anything that throws — listen(), invoke() failure, serde rejection,
       // FFmpeg-not-found — lands here and surfaces to the user.

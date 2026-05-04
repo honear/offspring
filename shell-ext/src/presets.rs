@@ -42,6 +42,10 @@ pub struct ToolsSettings {
     pub overlay: OverlayTool,
     #[serde(default)]
     pub trim: TrimTool,
+    #[serde(default)]
+    pub invert: InvertTool,
+    #[serde(default)]
+    pub make_square: MakeSquareTool,
 }
 
 #[derive(Deserialize, Clone, Debug)]
@@ -98,6 +102,28 @@ pub struct TrimTool {
 }
 
 impl Default for TrimTool {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
+}
+
+#[derive(Deserialize, Clone, Debug)]
+pub struct InvertTool {
+    pub enabled: bool,
+}
+
+impl Default for InvertTool {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
+}
+
+#[derive(Deserialize, Clone, Debug)]
+pub struct MakeSquareTool {
+    pub enabled: bool,
+}
+
+impl Default for MakeSquareTool {
     fn default() -> Self {
         Self { enabled: true }
     }

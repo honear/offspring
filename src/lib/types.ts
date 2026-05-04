@@ -71,6 +71,28 @@ export interface ToolsSettings {
   compare: CompareTool;
   overlay: OverlayTool;
   trim: TrimTool;
+  invert: InvertTool;
+  make_square: MakeSquareTool;
+}
+
+/** Image color invert with optional 0/255 clamp on every channel
+ *  (including alpha). Off-by-default clamp preserves gradients;
+ *  on-clamp produces a strict 1-bit-per-channel output for
+ *  cleaning up masks. */
+export interface InvertTool {
+  enabled: boolean;
+  clamp: boolean;
+}
+
+export type MakeSquareFillMode = "transparent" | "edge_color";
+
+/** Pad shorter edge of an image to match the longer one.
+ *  `fill_mode=transparent` forces output to PNG when input is JPEG
+ *  so the alpha channel survives. `edge_color` samples the top-left
+ *  pixel and pads with that. */
+export interface MakeSquareTool {
+  enabled: boolean;
+  fill_mode: MakeSquareFillMode;
 }
 
 /** Trim tool: per-file frame-accurate trim. UI surfaces a "Trim..."

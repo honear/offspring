@@ -9,7 +9,7 @@
   let presets = $state<Preset[]>([]);
   let selectedId = $state<string | null>(null);
   let selectedToolId = $state<
-    "sequence" | "merge" | "grayscale" | "compare" | "overlay" | "trim" | null
+    "sequence" | "merge" | "grayscale" | "compare" | "overlay" | "trim" | "invert" | "make_square" | null
   >(null);
   let settings = $state<Settings>({});
   let ffmpeg = $state<FfmpegStatus>({ found: false, path: null });
@@ -115,6 +115,16 @@
       name: "Trim",
       blurb: "Strip frames from the start and/or end of each file",
     },
+    {
+      id: "invert" as const,
+      name: "Invert",
+      blurb: "Invert RGB (and optionally clamp to pure 0/255) on images",
+    },
+    {
+      id: "make_square" as const,
+      name: "Make Square",
+      blurb: "Pad shorter edge of an image to match the longer one",
+    },
   ];
 
   /** Ensure `settings.tools` exists with full defaults — the Rust side
@@ -186,6 +196,12 @@
     if (!settings.tools.grayscale) settings.tools.grayscale = { enabled: true };
     if (!settings.tools.compare) settings.tools.compare = { enabled: true };
     if (!settings.tools.trim) settings.tools.trim = { enabled: true };
+    if (!settings.tools.invert) settings.tools.invert = { enabled: true, clamp: false };
+    if (settings.tools.invert.clamp == null) settings.tools.invert.clamp = false;
+    if (!settings.tools.make_square)
+      settings.tools.make_square = { enabled: true, fill_mode: "transparent" };
+    if (settings.tools.make_square.fill_mode == null)
+      settings.tools.make_square.fill_mode = "transparent";
     if (!settings.tools.overlay) {
       settings.tools.overlay = {
         enabled: false,
@@ -1267,6 +1283,79 @@
             shrink the output. <br>
             Enable/disable from the Tools sidebar on the left.
           </p>
+        {:else if selectedToolId === "invert"}
+          <div class="editor-head">
+            <h2 class="tool-title">Invert</h2>
+          </div>
+          <br>
+          <p class="muted">
+            Invert the RGB channels of an image — black pixels become
+            white, white become black, and colors flip to their
+            opposites. Useful for turning black-on-white masks into
+            white-on-black, or vice versa. The alpha channel is
+            preserved untouched, so a transparent PNG with black
+            opaque content comes out as the same shape rendered
+            white. Output filename is
+            <code>&lt;name&gt;_inverted.&lt;ext&gt;</code>.
+          </p>
+          <br>
+          <p class="muted tiny">
+            Image-only — refuses video inputs with a clear error. Works
+            on PNG, JPEG, WebP, AVIF, BMP, and TIFF.
+          </p>
+          <br>
+          <div class="fields tool-fields">
+            <label class="inline" title="When on, every channel (R, G, B, alpha) is thresholded to either 0 or 255 after the invert. Useful for cleaning up alpha masks where compression has introduced grey noise.">
+              <input
+                type="checkbox"
+                checked={settings.tools?.invert?.clamp ?? false}
+                onchange={(e) => {
+                  ensureTools();
+                  settings.tools!.invert.clamp = (e.currentTarget as HTMLInputElement).checked;
+                  saveSettings();
+                }}
+              />
+              <span><strong>Clamp to 0/255</strong> — every channel becomes pure black, pure white, or fully transparent / opaque. Off by default; turn on for binary masks.</span>
+            </label>
+          </div>
+        {:else if selectedToolId === "make_square"}
+          <div class="editor-head">
+            <h2 class="tool-title">Make Square</h2>
+          </div>
+          <br>
+          <p class="muted">
+            Pad the shorter edge of an image to match the longer one,
+            producing a square output the same width and height. The
+            original image stays centered; the new pixels are either
+            transparent or sampled from the image's edge. Output
+            filename is <code>&lt;name&gt;_square.&lt;ext&gt;</code>
+            (or <code>.png</code> when transparency is requested on a
+            JPEG input — JPEG can't carry an alpha channel).
+          </p>
+          <br>
+          <p class="muted tiny">
+            Image-only — refuses video inputs with a clear error.
+            Already-square inputs are skipped (the output would be
+            byte-identical so we save the encode pass).
+          </p>
+          <br>
+          <div class="fields tool-fields">
+            <label class="field">
+              <span><strong>Fill</strong> — what to put in the new pixels</span>
+              <select
+                value={settings.tools?.make_square?.fill_mode ?? "transparent"}
+                onchange={(e) => {
+                  ensureTools();
+                  const v = (e.currentTarget as HTMLSelectElement).value as "transparent" | "edge_color";
+                  settings.tools!.make_square.fill_mode = v;
+                  saveSettings();
+                }}
+              >
+                <option value="transparent">Transparent (PNG / WebP / AVIF; JPEG inputs become PNG)</option>
+                <option value="edge_color">Edge color (sampled from top-left pixel)</option>
+              </select>
+            </label>
+          </div>
         {:else if selected}
           <div class="editor-head">
             <input

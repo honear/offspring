@@ -678,6 +678,109 @@ pub fn encode_overlay(
     Ok(())
 }
 
+/// Invert tool: per-image color invert with optional binary clamp.
+/// Image-only — refuses video inputs. The `clamp` setting comes from
+/// `settings.tools.invert.clamp` so the right-click flow doesn't need
+/// to ferry it through the CLI / IPC layer.
+#[tauri::command]
+pub fn encode_invert(
+    app: tauri::AppHandle,
+    files: Vec<String>,
+) -> Result<(), String> {
+    if files.is_empty() {
+        return Err("Invert needs at least one file".into());
+    }
+    let settings = presets::load_settings().unwrap_or_default();
+    let ffmpeg_path = ffmpeg::resolve_ffmpeg(&settings).map_err(|e| e.to_string())?;
+    let clamp = settings.tools.invert.clamp;
+    let paths_in: Vec<std::path::PathBuf> =
+        files.iter().map(std::path::PathBuf::from).collect();
+    let total = paths_in.len();
+
+    std::thread::spawn(move || {
+        let app_cl = app.clone();
+        let result = ffmpeg::encode_invert_files(
+            &ffmpeg_path,
+            &paths_in,
+            clamp,
+            &settings,
+            move |ev: ProgressEvent| {
+                let _ = app_cl.emit("encode-progress", ev);
+            },
+        );
+        if let Err(e) = result {
+            let first_display = paths_in
+                .first()
+                .map(|p| p.display().to_string())
+                .unwrap_or_default();
+            let _ = app.emit(
+                "encode-progress",
+                ProgressEvent {
+                    file_index: 1,
+                    total_files: total,
+                    input: first_display,
+                    stage: "error".into(),
+                    percent: None,
+                    message: Some(e.to_string()),
+                },
+            );
+        }
+        let _ = app.emit("encode-finished", total);
+    });
+    Ok(())
+}
+
+/// Make-Square tool: pad shorter edge of each image to match the
+/// longer one. Image-only. Fill mode (transparent vs. edge-color)
+/// comes from `settings.tools.make_square.fill_mode`.
+#[tauri::command]
+pub fn encode_make_square(
+    app: tauri::AppHandle,
+    files: Vec<String>,
+) -> Result<(), String> {
+    if files.is_empty() {
+        return Err("Make Square needs at least one file".into());
+    }
+    let settings = presets::load_settings().unwrap_or_default();
+    let ffmpeg_path = ffmpeg::resolve_ffmpeg(&settings).map_err(|e| e.to_string())?;
+    let fill_mode = settings.tools.make_square.fill_mode.clone();
+    let paths_in: Vec<std::path::PathBuf> =
+        files.iter().map(std::path::PathBuf::from).collect();
+    let total = paths_in.len();
+
+    std::thread::spawn(move || {
+        let app_cl = app.clone();
+        let result = ffmpeg::encode_make_square_files(
+            &ffmpeg_path,
+            &paths_in,
+            fill_mode,
+            &settings,
+            move |ev: ProgressEvent| {
+                let _ = app_cl.emit("encode-progress", ev);
+            },
+        );
+        if let Err(e) = result {
+            let first_display = paths_in
+                .first()
+                .map(|p| p.display().to_string())
+                .unwrap_or_default();
+            let _ = app.emit(
+                "encode-progress",
+                ProgressEvent {
+                    file_index: 1,
+                    total_files: total,
+                    input: first_display,
+                    stage: "error".into(),
+                    percent: None,
+                    message: Some(e.to_string()),
+                },
+            );
+        }
+        let _ = app.emit("encode-finished", total);
+    });
+    Ok(())
+}
+
 /// Trim tool: per-file frame-accurate trim. Strips `start_frames` from
 /// the front and `end_frames` from the back of each input, and
 /// optionally cuts the inclusive range `[remove_from, remove_to]` out
@@ -906,6 +1009,10 @@ pub struct PendingState {
     /// the dialog calling `encode_trim`, so we only need to remember
     /// the dialog-routing decision in pending state.
     pub trim_dialog: std::sync::Mutex<bool>,
+    /// True when the progress window should route to `encode_invert`.
+    pub invert: std::sync::Mutex<bool>,
+    /// True when the progress window should route to `encode_make_square`.
+    pub make_square: std::sync::Mutex<bool>,
 }
 
 pub trait AppHandleExt {
@@ -917,6 +1024,8 @@ pub trait AppHandleExt {
     fn manage_pending_compare(&self, v: bool);
     fn manage_pending_overlay(&self, v: bool);
     fn manage_pending_trim_dialog(&self, v: bool);
+    fn manage_pending_invert(&self, v: bool);
+    fn manage_pending_make_square(&self, v: bool);
 }
 
 impl AppHandleExt for tauri::AppHandle {
@@ -960,6 +1069,26 @@ impl AppHandleExt for tauri::AppHandle {
             *state.trim_dialog.lock().unwrap() = v;
         }
     }
+    fn manage_pending_invert(&self, v: bool) {
+        if let Some(state) = self.try_state::<PendingState>() {
+            *state.invert.lock().unwrap() = v;
+        }
+    }
+    fn manage_pending_make_square(&self, v: bool) {
+        if let Some(state) = self.try_state::<PendingState>() {
+            *state.make_square.lock().unwrap() = v;
+        }
+    }
+}
+
+#[tauri::command]
+pub fn get_pending_invert(state: tauri::State<'_, PendingState>) -> bool {
+    *state.invert.lock().unwrap()
+}
+
+#[tauri::command]
+pub fn get_pending_make_square(state: tauri::State<'_, PendingState>) -> bool {
+    *state.make_square.lock().unwrap()
 }
 
 #[tauri::command]

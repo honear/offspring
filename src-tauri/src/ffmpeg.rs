@@ -2281,6 +2281,369 @@ pub fn encode_compare_files(
     Ok(out)
 }
 
+/// Per-codec args + extension for "encode this image with reasonable
+/// defaults" — used by the image-only tools (Invert, MakeSquare,
+/// Compare). Keeps the per-tool encode functions from each
+/// reinventing the codec switch. Quality values match the encode_file
+/// image branch's "high quality" baseline.
+fn append_image_codec_args(cmd: &mut Command, codec: &crate::presets::ImageCodec) {
+    use crate::presets::ImageCodec;
+    match codec {
+        ImageCodec::Png => {
+            cmd.args(["-c:v", "png", "-compression_level", "6"]);
+        }
+        ImageCodec::Jpeg => {
+            cmd.args(["-c:v", "mjpeg", "-q:v", "3", "-pix_fmt", "yuvj420p"]);
+        }
+        ImageCodec::Webp => {
+            cmd.args(["-c:v", "libwebp", "-quality", "85", "-lossless", "0"]);
+        }
+        ImageCodec::Avif => {
+            cmd.args(["-c:v", "libaom-av1", "-crf", "24", "-still-picture", "1"]);
+        }
+    }
+}
+
+/// Map an input path's extension to one of our supported `ImageCodec`
+/// variants. BMP / TIFF (and anything else) fall back to PNG so we
+/// always end up with a lossless-or-better output rather than failing.
+fn image_codec_from_ext(path: &Path) -> crate::presets::ImageCodec {
+    use crate::presets::ImageCodec;
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    match ext.as_str() {
+        "jpg" | "jpeg" => ImageCodec::Jpeg,
+        "webp" => ImageCodec::Webp,
+        "avif" => ImageCodec::Avif,
+        _ => ImageCodec::Png,
+    }
+}
+
+/// True if the codec's container can carry an alpha channel. JPEG and
+/// the (rare) MJPEG variants can't. Used by MakeSquare to decide
+/// whether to honor a "transparent" fill request or upgrade the
+/// output container to PNG.
+fn codec_supports_alpha(codec: &crate::presets::ImageCodec) -> bool {
+    use crate::presets::ImageCodec;
+    !matches!(codec, ImageCodec::Jpeg)
+}
+
+/// Probe the top-left pixel of `input`, returning it as `(r, g, b)`
+/// each in 0..=255. Used by MakeSquare's `EdgeColor` fill mode to
+/// pick a pad color that matches the image's actual edge.
+///
+/// Implementation: feed input to ffmpeg with a 1×1 crop at (0, 0),
+/// rgb24 format, single frame, and have it write three raw bytes to
+/// stdout. The bytes ARE the pixel, no decoding gymnastics needed.
+fn probe_corner_color(ffmpeg: &Path, input: &Path) -> Option<(u8, u8, u8)> {
+    let mut cmd = Command::new(ffmpeg);
+    cmd.args(["-v", "error", "-y"])
+        .arg("-i")
+        .arg(input)
+        .args(["-vf", "crop=1:1:0:0,format=rgb24"])
+        .args(["-frames:v", "1", "-f", "rawvideo", "-"])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .stdout(Stdio::piped());
+    hide_console(&mut cmd);
+    let out = cmd.output().ok()?;
+    if out.stdout.len() >= 3 {
+        Some((out.stdout[0], out.stdout[1], out.stdout[2]))
+    } else {
+        None
+    }
+}
+
+/// Invert tool: per-image color-channel invert with optional binary
+/// clamp. Refuses video inputs with a clear error rather than letting
+/// `negate` produce an unexpected video clip.
+///
+/// Without `clamp`, the filter is just `negate` — RGB channels are
+/// inverted (`out = 255 - in`), alpha is preserved as-is.
+///
+/// With `clamp`, we follow `negate` with a `geq` pass that thresholds
+/// every channel (R, G, B, AND alpha) to either 0 or 255 at midpoint
+/// 127. The result is a strict 1-bit-per-channel image — useful for
+/// cleaning up alpha masks or layer-mask PNGs where compression
+/// artifacts and anti-aliased edges have introduced grey "noise".
+/// `geq` is per-pixel-evaluated and slow for huge inputs, but for
+/// typical mask-sized images it's fine.
+pub fn encode_invert_files(
+    ffmpeg: &Path,
+    files: &[PathBuf],
+    clamp: bool,
+    settings: &Settings,
+    mut on_progress: impl FnMut(ProgressEvent),
+) -> Result<()> {
+    if files.is_empty() {
+        bail!("Invert needs at least one file");
+    }
+    if !files.iter().all(|p| is_image_path(p)) {
+        bail!(
+            "Invert only works on still images (PNG / JPEG / WebP / \
+             AVIF / BMP / TIFF). Video files have no single frame to \
+             invert; for video, use a Greyscale preset or a custom \
+             ffmpeg pipeline."
+        );
+    }
+
+    let total = files.len();
+    let verbosity = settings
+        .verbosity
+        .clone()
+        .unwrap_or_else(|| "warning".into());
+
+    // Filter graph: `negate` for the invert; with `clamp`, follow
+    // with a per-channel threshold via `geq`. The geq expression
+    // names (`r(X,Y)`, `g(X,Y)`, etc.) reference source pixel values
+    // at the current output coords; ffmpeg keeps things in-place so
+    // `negate,geq=...` reads the negated pixel, not the original.
+    let filter = if clamp {
+        "negate,geq=\
+         r='if(gt(r(X\\,Y)\\,127)\\,255\\,0)':\
+         g='if(gt(g(X\\,Y)\\,127)\\,255\\,0)':\
+         b='if(gt(b(X\\,Y)\\,127)\\,255\\,0)':\
+         a='if(gt(alpha(X\\,Y)\\,127)\\,255\\,0)'"
+            .to_string()
+    } else {
+        "negate".to_string()
+    };
+
+    for (idx, input) in files.iter().enumerate() {
+        let file_index = idx + 1;
+        let input_display = input.display().to_string();
+        let codec = image_codec_from_ext(input);
+        let stem = input
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("output");
+        let dir = input.parent().unwrap_or(Path::new(".")).to_path_buf();
+        let base = dir.join(format!("{stem}_inverted.{}", codec.ext()));
+        let out = unique_output_path(&base);
+
+        on_progress(ProgressEvent {
+            file_index,
+            total_files: total,
+            input: input_display.clone(),
+            stage: "encode".into(),
+            percent: None,
+            message: Some(format!(
+                "Inverting {}{}",
+                codec.ext().to_ascii_uppercase(),
+                if clamp { " (clamped to 0/255)" } else { "" }
+            )),
+        });
+
+        let mut cmd = Command::new(ffmpeg);
+        cmd.args(["-v", &verbosity, "-y", "-hide_banner"])
+            .arg("-i")
+            .arg(input)
+            .args(["-vf", &filter])
+            .args(["-frames:v", "1"]);
+        append_image_codec_args(&mut cmd, &codec);
+        cmd.arg(&out);
+
+        run_with_progress(
+            cmd,
+            None,
+            file_index,
+            total,
+            &input_display,
+            "encode",
+            &mut on_progress,
+        )?;
+
+        on_progress(ProgressEvent {
+            file_index,
+            total_files: total,
+            input: input_display,
+            stage: "done".into(),
+            percent: Some(1.0),
+            message: Some(out.display().to_string()),
+        });
+    }
+
+    Ok(())
+}
+
+/// Make-Square tool: per-image pad to a square whose side equals the
+/// longer edge of the source. `fill_mode` decides what the new pixels
+/// are filled with:
+///
+///   * `Transparent` → `black@0` pad. Output codec is forced to
+///     something that supports alpha; if the input is JPEG, output
+///     becomes PNG so the transparency actually survives.
+///   * `EdgeColor` → sample the top-left pixel of the input via
+///     `probe_corner_color`, pad with that. Output keeps the input's
+///     codec. If the probe fails (rare — only happens if ffmpeg
+///     can't decode the file at all), fall back to white so we still
+///     produce a useful result rather than erroring.
+pub fn encode_make_square_files(
+    ffmpeg: &Path,
+    files: &[PathBuf],
+    fill_mode: crate::presets::MakeSquareFillMode,
+    settings: &Settings,
+    mut on_progress: impl FnMut(ProgressEvent),
+) -> Result<()> {
+    use crate::presets::{ImageCodec, MakeSquareFillMode};
+
+    if files.is_empty() {
+        bail!("Make Square needs at least one file");
+    }
+    if !files.iter().all(|p| is_image_path(p)) {
+        bail!(
+            "Make Square only works on still images (PNG / JPEG / WebP \
+             / AVIF / BMP / TIFF). Video files don't have a single \
+             aspect ratio to pad; for video, use a crop-aspect MP4 preset \
+             instead."
+        );
+    }
+
+    let total = files.len();
+    let verbosity = settings
+        .verbosity
+        .clone()
+        .unwrap_or_else(|| "warning".into());
+
+    for (idx, input) in files.iter().enumerate() {
+        let file_index = idx + 1;
+        let input_display = input.display().to_string();
+
+        // Probe the source so we can compute the longer edge and
+        // build the `pad` filter. Without dimensions we can't square
+        // anything, so a probe failure is fatal for that one file —
+        // surface it as an error event and continue with the rest.
+        let probe = probe_video(ffmpeg, input);
+        let (Some(src_w), Some(src_h)) = (probe.width, probe.height) else {
+            on_progress(ProgressEvent {
+                file_index,
+                total_files: total,
+                input: input_display.clone(),
+                stage: "error".into(),
+                percent: None,
+                message: Some(
+                    "Could not read image dimensions; skipping.".into(),
+                ),
+            });
+            continue;
+        };
+        let side = src_w.max(src_h);
+
+        // Already square? Skip the encode pass — the output would be
+        // bit-identical and the user clicking "Make Square" on a
+        // square image probably means "make sure this stays square",
+        // which is satisfied by a no-op + a "done" event.
+        if src_w == src_h {
+            on_progress(ProgressEvent {
+                file_index,
+                total_files: total,
+                input: input_display.clone(),
+                stage: "done".into(),
+                percent: Some(1.0),
+                message: Some(format!(
+                    "{} is already {src_w}x{src_h} — nothing to do.",
+                    input.file_name().and_then(|n| n.to_str()).unwrap_or("(file)")
+                )),
+            });
+            continue;
+        }
+
+        // Resolve the output codec. For Transparent fill, we MUST end
+        // up at a codec that carries alpha — JPEG inputs get bumped
+        // to PNG, others keep their native format.
+        let input_codec = image_codec_from_ext(input);
+        let codec = match fill_mode {
+            MakeSquareFillMode::Transparent if !codec_supports_alpha(&input_codec) => {
+                ImageCodec::Png
+            }
+            _ => input_codec,
+        };
+
+        // Pick the pad color string. ffmpeg's pad accepts named
+        // colors and `0xRRGGBB[@A]` hex literals; we go hex for
+        // determinism. EdgeColor falls back to white if probing
+        // fails — a visible-but-neutral background is better than
+        // erroring out per-file.
+        let pad_color = match fill_mode {
+            MakeSquareFillMode::Transparent => "black@0".to_string(),
+            MakeSquareFillMode::EdgeColor => probe_corner_color(ffmpeg, input)
+                .map(|(r, g, b)| format!("0x{r:02X}{g:02X}{b:02X}"))
+                .unwrap_or_else(|| "white".to_string()),
+        };
+
+        // For Transparent fill the source must arrive at the pad
+        // filter as RGBA (otherwise alpha is dropped in YUV
+        // intermediates). The `format=rgba` filter is harmless even
+        // when the input already has alpha — ffmpeg recognises the
+        // no-op.
+        let filter = match fill_mode {
+            MakeSquareFillMode::Transparent => format!(
+                "format=rgba,pad={side}:{side}:({side}-iw)/2:({side}-ih)/2:color={pad_color}"
+            ),
+            MakeSquareFillMode::EdgeColor => format!(
+                "pad={side}:{side}:({side}-iw)/2:({side}-ih)/2:color={pad_color}"
+            ),
+        };
+
+        let stem = input
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("output");
+        let dir = input.parent().unwrap_or(Path::new(".")).to_path_buf();
+        let base = dir.join(format!("{stem}_square.{}", codec.ext()));
+        let out = unique_output_path(&base);
+
+        on_progress(ProgressEvent {
+            file_index,
+            total_files: total,
+            input: input_display.clone(),
+            stage: "encode".into(),
+            percent: None,
+            message: Some(format!(
+                "Padding to {side}x{side} ({}) → {}",
+                match fill_mode {
+                    MakeSquareFillMode::Transparent => "transparent".to_string(),
+                    MakeSquareFillMode::EdgeColor => format!("edge color {pad_color}"),
+                },
+                codec.ext().to_ascii_uppercase()
+            )),
+        });
+
+        let mut cmd = Command::new(ffmpeg);
+        cmd.args(["-v", &verbosity, "-y", "-hide_banner"])
+            .arg("-i")
+            .arg(input)
+            .args(["-vf", &filter])
+            .args(["-frames:v", "1"]);
+        append_image_codec_args(&mut cmd, &codec);
+        cmd.arg(&out);
+
+        run_with_progress(
+            cmd,
+            None,
+            file_index,
+            total,
+            &input_display,
+            "encode",
+            &mut on_progress,
+        )?;
+
+        on_progress(ProgressEvent {
+            file_index,
+            total_files: total,
+            input: input_display,
+            stage: "done".into(),
+            percent: Some(1.0),
+            message: Some(out.display().to_string()),
+        });
+    }
+
+    Ok(())
+}
+
 /// Image-only Compare: stack N stills horizontally into one still.
 /// Output format matches the first input's codec (JPEG → JPEG, PNG →
 /// PNG, etc.). Falls back to PNG for unrecognised extensions

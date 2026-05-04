@@ -65,6 +65,18 @@ pub enum Command {
         /// Input files.
         files: Vec<PathBuf>,
     },
+    /// Invert RGB (and optionally clamp) per-image. Image-only.
+    /// Output is `<stem>_inverted.<ext>` keeping the source format.
+    Invert {
+        files: Vec<PathBuf>,
+    },
+    /// Pad shorter edge of an image to match the longer one,
+    /// producing a square output. Image-only. Output is
+    /// `<stem>_square.<ext>` (or `_square.png` when transparency is
+    /// requested on a JPEG input).
+    MakeSquare {
+        files: Vec<PathBuf>,
+    },
     /// Open the main Offspring settings window. Wired to a trailing
     /// "Offspring settings" entry in the right-click menu so users can
     /// reach the UI without launching the app from Start.

@@ -15,6 +15,8 @@ use windows::Win32::UI::Shell::*;
 use crate::child::ChildCommand;
 use crate::compare::CompareCommand;
 use crate::grayscale::GrayscaleCommand;
+use crate::invert::InvertCommand;
+use crate::make_square::MakeSquareCommand;
 use crate::merge::MergeCommand;
 use crate::overlay::OverlayCommand;
 use crate::presets::{load_presets, read_exe_path};
@@ -46,6 +48,8 @@ impl RootCommand {
         out.push(CompareCommand::new().into());
         out.push(OverlayCommand::new().into());
         out.push(TrimCommand::new().into());
+        out.push(InvertCommand::new().into());
+        out.push(MakeSquareCommand::new().into());
         out.push(SettingsCommand::new().into());
         out
     }

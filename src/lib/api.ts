@@ -65,6 +65,18 @@ export const encodeCompare = (files: string[]) =>
 export const encodeOverlay = (files: string[]) =>
   invoke<void>("encode_overlay", { files });
 
+/** Invert tool: per-image color invert. Image-only — the backend
+ *  refuses video inputs with a clear error. The clamp setting comes
+ *  from `settings.tools.invert.clamp` server-side, no arg needed. */
+export const encodeInvert = (files: string[]) =>
+  invoke<void>("encode_invert", { files });
+
+/** Make Square tool: pad shorter edge of each image to match the
+ *  longer one. Image-only. Fill mode comes from
+ *  `settings.tools.make_square.fill_mode` server-side. */
+export const encodeMakeSquare = (files: string[]) =>
+  invoke<void>("encode_make_square", { files });
+
 /** Trim encode: strip `startFrames` from the front and `endFrames`
  *  from the back of each input, and optionally cut the inclusive
  *  range `[removeFrom, removeTo]` from the middle. Per-file
@@ -96,6 +108,8 @@ export const getPendingGrayscale = () => invoke<boolean>("get_pending_grayscale"
 export const getPendingCompare = () => invoke<boolean>("get_pending_compare");
 export const getPendingOverlay = () => invoke<boolean>("get_pending_overlay");
 export const getPendingTrimDialog = () => invoke<boolean>("get_pending_trim_dialog");
+export const getPendingInvert = () => invoke<boolean>("get_pending_invert");
+export const getPendingMakeSquare = () => invoke<boolean>("get_pending_make_square");
 
 /** Stash files + custom preset in app state ahead of navigating the current
  * webview to the progress route. Unlike the old `start_custom_encode`, this
