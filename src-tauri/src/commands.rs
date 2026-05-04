@@ -775,12 +775,19 @@ pub fn open_progress_window(app: &tauri::AppHandle) -> anyhow::Result<()> {
     // normalises against its registered routes is `/progress/` — NOT
     // `/progress.html`, which 404s on the router even though the file is
     // present on disk.
+    //
+    // `.visible(false)` builds the OS window hidden so WebView2 has time
+    // to fetch + execute the Svelte bundle before anything appears on
+    // screen. The progress route calls `getCurrentWindow().show()` from
+    // its `onMount` once Svelte has rendered its first frame, killing
+    // the brief blank-window flash that used to precede the encoder UI.
     let mut b = WebviewWindowBuilder::new(app, "progress", WebviewUrl::App("progress/".into()))
         .title("Offspring — Encoding")
         .inner_size(pw, ph)
         .resizable(false)
         .always_on_top(true)
-        .decorations(true);
+        .decorations(true)
+        .visible(false);
     if let Some((x, y)) = position_near_cursor(app, pw, ph) {
         b = b.position(x, y);
     }
@@ -794,7 +801,10 @@ pub fn open_custom_window(app: &tauri::AppHandle, files: Vec<String>) -> anyhow:
         .title("Offspring — Custom")
         .inner_size(pw, ph)
         .min_inner_size(460.0, 440.0)
-        .resizable(true);
+        .resizable(true)
+        // See `open_progress_window` for why this is hidden-by-default.
+        // The Custom route reveals itself in `onMount` after first paint.
+        .visible(false);
     if let Some((x, y)) = position_near_cursor(app, pw, ph) {
         b = b.position(x, y);
     }
@@ -810,14 +820,16 @@ pub fn open_custom_window(app: &tauri::AppHandle, files: Vec<String>) -> anyhow:
 /// file list. The window itself navigates to /progress/ once the user
 /// clicks Trim, so we don't need a separate progress-window open here.
 ///
-/// Focus dance at the end: when the shell-extension spawns offspring.exe
-/// from Explorer, Explorer keeps the foreground by default and the new
-/// dialog ends up behind it. Briefly toggling `always_on_top` bypasses
-/// Windows' focus-stealing prevention long enough for `set_focus` to
-/// actually move the foreground to us; we drop always-on-top right away
-/// so the user can later put another window over the dialog if they
-/// want to. Same trick the progress window uses (which keeps it on
-/// permanently — cosmetic difference, no behavioral one).
+/// The window is built invisible so the Svelte route mounts before the
+/// OS window appears (avoids a blank-frame flash). The frontend's
+/// `onMount` shows it AND performs the always-on-top → set_focus →
+/// always-on-top-off focus dance — when the shell-extension spawns
+/// offspring.exe from Explorer, Explorer keeps the foreground by
+/// default and the new dialog ends up behind it. Briefly toggling
+/// `always_on_top` bypasses Windows' focus-stealing prevention long
+/// enough for `set_focus` to actually move the foreground to us; we
+/// drop always-on-top right away so the user can later put another
+/// window over the dialog if they want to.
 pub fn open_trim_window(app: &tauri::AppHandle, files: Vec<String>) -> anyhow::Result<()> {
     let (pw, ph) = (440.0, 420.0);
     let mut b = WebviewWindowBuilder::new(app, "trim", WebviewUrl::App("trim/".into()))
@@ -825,16 +837,14 @@ pub fn open_trim_window(app: &tauri::AppHandle, files: Vec<String>) -> anyhow::R
         .inner_size(pw, ph)
         .min_inner_size(380.0, 320.0)
         .resizable(true)
-        .focused(true);
+        .focused(true)
+        .visible(false);
     if let Some((x, y)) = position_near_cursor(app, pw, ph) {
         b = b.position(x, y);
     }
     let w = b.build()?;
     app.manage_pending_files(files);
-    let _ = w.unminimize();
-    let _ = w.set_always_on_top(true);
-    let _ = w.set_focus();
-    let _ = w.set_always_on_top(false);
+    let _ = w; // frontend handles show() + focus dance after first paint
     Ok(())
 }
 
