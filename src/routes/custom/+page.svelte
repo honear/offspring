@@ -12,10 +12,14 @@
   let encoding = $state(false);
 
   onMount(async () => {
-    // Reveal the window after Svelte has rendered. Rust builds it
-    // with `.visible(false)` so the WebView2 paint delay no longer
-    // shows as a blank-frame flash before the dialog content appears.
-    void getCurrentWindow().show().catch(() => {});
+    // Reveal the window once WebView2 has actually painted the first
+    // frame. `onMount` runs as soon as the DOM is built, which is one
+    // or two frames before pixels reach the screen — calling `show()`
+    // earlier than that is what produced the brief blank-window flash.
+    // See `afterFirstPaint` in `$lib/api`.
+    void api.afterFirstPaint().then(() =>
+      getCurrentWindow().show().catch(() => {}),
+    );
     preset = await api.getCustomLast();
     files = await api.getPendingFiles();
   });
