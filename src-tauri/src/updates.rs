@@ -59,6 +59,20 @@ const TIMEOUT: Duration = Duration::from_secs(5);
 /// substitute a different signing identity.
 const UPDATE_MINISIGN_PUBKEY: &str = "RWSozxN0N0fWyF2cXP0fC+q5Hg2kb2zW/ML+e+zItvm7A8BCXNLZunjr";
 
+// Compile-time guard: a build with no pinned pubkey is a build whose
+// in-app updater would happily install anything signed by anyone — i.e.
+// not actually verified at all. We needed an empty-string fallback
+// during initial bringup; now that a real key is pinned, removing that
+// escape hatch makes "shipped with no pubkey" a strict-error scenario
+// that fails before the installer is even produced. If you ever need
+// to roll the key, set the new value here and the build still passes;
+// only the EMPTY placeholder is rejected.
+const _: () = assert!(
+    !UPDATE_MINISIGN_PUBKEY.is_empty(),
+    "UPDATE_MINISIGN_PUBKEY must be a real minisign public key before this build can ship. \
+     Paste the second line of installer/.minisign/offspring.pub here."
+);
+
 #[derive(Serialize, Clone, Debug, Default)]
 pub struct UpdateInfo {
     /// Running version from `CARGO_PKG_VERSION` (e.g. "0.2.0").
@@ -463,21 +477,11 @@ fn stream_installer(app: &AppHandle, version: &str, url: &str) -> Result<PathBuf
 /// sidecars, or unreadable signatures are hard errors — the installer
 /// is refused.
 ///
-/// When the pubkey is the empty placeholder we log a one-line warning
-/// to `debug.log` (so the lapse is auditable later) and return Ok.
-/// That's the same behaviour that existed before this code, so flipping
-/// the constant on is a strict tightening with no surprise regressions
-/// for already-published unsigned releases.
+/// The empty-pubkey fallback that used to live at the top of this
+/// function ("if pubkey blank, log + proceed") was dropped once the
+/// real pubkey was pinned; the const-assert next to UPDATE_MINISIGN_PUBKEY
+/// now makes "shipped with no pubkey" a compile-time error.
 fn verify_installer_signature(file: &std::path::Path, _version: &str, url: &str) -> Result<()> {
-    if UPDATE_MINISIGN_PUBKEY.is_empty() {
-        crate::debug_log::log(&format!(
-            "update: minisign verification skipped — UPDATE_MINISIGN_PUBKEY is the empty placeholder. \
-             Generate a key (`minisign -G`), paste the public key into updates.rs, and start signing \
-             releases (`minisign -Sm <installer>.exe`) before publishing this build."
-        ));
-        return Ok(());
-    }
-
     use minisign_verify::{PublicKey, Signature};
 
     // `from_base64` expects the bare base64 line (the body of

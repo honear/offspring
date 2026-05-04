@@ -55,7 +55,13 @@ the app at a pre-existing FFmpeg install from the Settings tab.
 
 Updates: once installed, Offspring checks GitHub Releases on launch,
 downloads a new installer in the background, and offers a one-click
-"Restart and install" when it's ready.
+"Restart and install" when it's ready. Every installer is signed
+offline with an Ed25519 [minisign](https://jedisct1.github.io/minisign/)
+key whose public counterpart is pinned in the binary; the in-app
+updater verifies the signature against that key and refuses to
+launch any installer whose signature is missing or doesn't match.
+See [SECURITY.md](./SECURITY.md) and [THREAT_MODEL.md](./THREAT_MODEL.md)
+for the full picture.
 
 ## FFmpeg licensing
 
@@ -70,6 +76,14 @@ LGPL does not propagate to Offspring's own code. Offspring itself is MIT.
 
 Full third-party attributions live in [NOTICE.md](./NOTICE.md).
 
+
+## Privacy
+
+Offspring makes no analytics, telemetry, or phone-home calls. The only
+outbound network traffic is the GitHub Releases update check, the
+gyan.dev FFmpeg download (one-time, user-triggered), and the
+user-triggered installer download. Full inventory in
+[SECURITY.md → Privacy / network connections](./SECURITY.md#privacy--network-connections).
 
 ## License
 

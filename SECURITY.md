@@ -59,6 +59,22 @@ in short:
   The pipe is local-and-current-user-only by Windows' default DACL,
   and the only effect is to make the primary instance briefly busy.
 
+## Privacy / network connections
+
+Offspring makes **no analytics, telemetry, or "phone-home" calls**. The
+only outbound network traffic the app ever generates is:
+
+| When | Where | Why |
+|---|---|---|
+| On launch | `https://api.github.com/repos/honear/offspring/releases/latest` | Update check. Fire-and-forget; failures collapse to "no update available" with no UI. The request carries the running version in the `User-Agent` header for release-page traffic stats; no other identifying data. |
+| When the user clicks "Restart and install" on a pending update | GitHub-owned download host (one of `github.com`, `objects.githubusercontent.com`, `release-assets.githubusercontent.com`) | Downloads the installer .exe and its `.minisig` sidecar. Refuses to fetch from any other host. |
+| When the user clicks "Download FFmpeg" in Settings (or accepts the prompt on first install) | `https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip` and the matching `.sha256` sidecar | One-time FFmpeg fetch. After that, no further gyan.dev traffic. |
+
+That's the complete list. No background pings, no crash reports, no
+usage stats, no third-party SDKs, no remote config, no A/B tests. The
+in-app debug log lives only on the user's machine
+(`%LOCALAPPDATA%\Offspring\debug.log`) and is never uploaded.
+
 ## What we already do
 
 - All update installers are signed with a pinned Ed25519 (minisign)
