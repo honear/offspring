@@ -293,30 +293,55 @@ pub(crate) fn guides_filters(g: &GuidesConfig) -> Vec<String> {
     out
 }
 
+/// Strict whitelist of color tokens accepted from user-controlled
+/// preset/settings fields. Accepts only:
+///   * one of the basic named colors the UI dropdown can produce
+///     (white/black/red/green/blue/yellow/cyan/magenta), or
+///   * a hex literal in `#rrggbb`, `#rrggbbaa`, `0xrrggbb`, or
+///     `0xrrggbbaa` form.
+///
+/// Anything else (extra `:`/`,`/`@` separators, unknown words, malformed
+/// hex) falls back to `white` — same fallback the existing empty-string
+/// branch used. Defense-in-depth against filter-graph injection: color
+/// values flow into unquoted ffmpeg filter args
+/// (`drawbox=...:color={c}:thickness=3`), so without a whitelist a
+/// string like `red:thickness=99999` would inject extra k/v pairs.
+fn sanitize_color(c: &str) -> String {
+    const NAMED: &[&str] = &[
+        "white", "black", "red", "green", "blue", "yellow", "cyan", "magenta",
+    ];
+    let trimmed = c.trim();
+    if trimmed.is_empty() {
+        return "white".to_string();
+    }
+    let lowered = trimmed.to_ascii_lowercase();
+    if NAMED.iter().any(|n| *n == lowered) {
+        return lowered;
+    }
+    let hex_body: Option<&str> = if let Some(rest) = trimmed.strip_prefix('#') {
+        Some(rest)
+    } else if let Some(rest) = trimmed.strip_prefix("0x").or_else(|| trimmed.strip_prefix("0X")) {
+        Some(rest)
+    } else {
+        None
+    };
+    if let Some(rest) = hex_body {
+        if matches!(rest.len(), 6 | 8) && rest.chars().all(|c| c.is_ascii_hexdigit()) {
+            return format!("0x{}", rest.to_ascii_lowercase());
+        }
+    }
+    "white".to_string()
+}
+
 /// Return an ffmpeg-parseable color string with the given alpha baked in.
-/// Normalizes the caller's color so a stray `#rrggbb` (which the HTML
-/// color picker emits and which occasionally leaks past the UI-side
-/// `0x…` conversion) becomes `0xrrggbb` — ffmpeg's drawbox parses `#` too
-/// but it's less robust across versions, and we've tripped on it before.
-/// Empty strings fall back to white rather than producing `@0.9` alone,
-/// which ffmpeg rejects with a filter-init error.
+/// Routes through [`sanitize_color`] so a malformed/hostile color field
+/// can't inject extra filter k/v pairs. Empty strings fall back to white
+/// rather than producing `@0.9` alone, which ffmpeg rejects with a
+/// filter-init error.
 fn color_with_alpha(c: &str, alpha: f32) -> String {
     let a = alpha.clamp(0.0, 1.0);
-    let trimmed = c.trim();
-    let base: String = if trimmed.is_empty() {
-        "white".to_string()
-    } else if let Some(rest) = trimmed.strip_prefix('#') {
-        format!("0x{rest}")
-    } else {
-        trimmed.to_string()
-    };
-    // Honor any pre-existing `@` (e.g. if a preset explicitly pinned the
-    // alpha) by leaving the caller's value alone.
-    if base.contains('@') {
-        base
-    } else {
-        format!("{base}@{a:.2}")
-    }
+    let base = sanitize_color(c);
+    format!("{base}@{a:.2}")
 }
 
 /// Emit a drawbox + a drawtext label, both sized/placed relative to the
@@ -499,10 +524,16 @@ fn overlay_drawtext(
         }
     };
     let a = opacity.clamp(0.0, 1.0);
+    // Route the user-controlled color through the same whitelist
+    // `color_with_alpha` uses, so a malformed value can't inject extra
+    // `:k=v` pairs into the drawtext arg list. The resulting `0x…` /
+    // named-color string contains no `:` `,` `@`, all of which would
+    // otherwise be filter-grammar separators here.
+    let color_clean = sanitize_color(color);
     format!(
         "drawtext=fontfile='C\\:/Windows/Fonts/consola.ttf':text='{text}':fontcolor={color}@{a:.2}:fontsize=h/{font_div:.2}:x={x}:y={y}:box=1:boxcolor=black@{box_a:.2}:boxborderw={box_bw}",
         text = text_expr,
-        color = color,
+        color = color_clean,
         a = a,
         x = x,
         y = y,

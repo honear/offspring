@@ -26,6 +26,27 @@ use crate::presets::Preset;
 /// integration call (toggle save, first-run, etc.).
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
+/// Resolve the absolute path to Windows PowerShell (5.x) under
+/// `%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe`. Using
+/// the absolute path avoids PATH-hijack scenarios where a malicious
+/// `powershell.exe` planted in a writable PATH entry (or the current
+/// working directory) would be invoked instead. Falls back to the bare
+/// `powershell.exe` name if `%SystemRoot%` is somehow unset, so the call
+/// still has a chance of working on a hardened/locked-down system.
+fn powershell_exe() -> PathBuf {
+    if let Some(sysroot) = std::env::var_os("SystemRoot") {
+        let p = PathBuf::from(sysroot)
+            .join("System32")
+            .join("WindowsPowerShell")
+            .join("v1.0")
+            .join("powershell.exe");
+        if p.exists() {
+            return p;
+        }
+    }
+    PathBuf::from("powershell.exe")
+}
+
 /// Matches `<Identity Name>` in `installer/msix/AppxManifest.xml`.
 const PACKAGE_NAME: &str = "SecondMarch.Offspring.ShellExt";
 
@@ -46,7 +67,7 @@ fn install_dir() -> Result<PathBuf> {
 /// surfacing stderr otherwise. `-NoProfile` + `-NonInteractive` keep
 /// cargo-test and background invocations from stalling.
 fn ps(script: &str) -> Result<()> {
-    let output = Command::new("powershell.exe")
+    let output = Command::new(powershell_exe())
         .args([
             "-NoProfile",
             "-NonInteractive",
@@ -67,14 +88,24 @@ fn ps(script: &str) -> Result<()> {
     Ok(())
 }
 
+/// Escape an arbitrary string for use inside a PowerShell single-quoted
+/// literal: `'` becomes `''`, which is PowerShell's only in-quote escape
+/// for single quotes. Anything else is preserved verbatim — single
+/// quotes don't honour backslash, `$`, or backtick escapes, so a path
+/// like `C:\Users\O'Brien` round-trips cleanly as `'C:\Users\O''Brien'`.
+fn ps_escape_single(s: &str) -> String {
+    s.replace('\'', "''")
+}
+
 fn is_registered() -> bool {
-    let Ok(output) = Command::new("powershell.exe")
+    let Ok(output) = Command::new(powershell_exe())
         .args([
             "-NoProfile",
             "-NonInteractive",
             "-Command",
             &format!(
-                "if (Get-AppxPackage -Name '{PACKAGE_NAME}' -ErrorAction SilentlyContinue) {{ 'yes' }}"
+                "if (Get-AppxPackage -Name '{}' -ErrorAction SilentlyContinue) {{ 'yes' }}",
+                ps_escape_single(PACKAGE_NAME)
             ),
         ])
         .creation_flags(CREATE_NO_WINDOW)
@@ -117,17 +148,20 @@ pub fn cleanup() -> Result<()> {
     // unconditionally; the package may not be registered at all if the
     // user never flipped the toggle on.
     let _ = ps(&format!(
-        "Get-AppxPackage -Name '{PACKAGE_NAME}' -ErrorAction SilentlyContinue | \
-         Remove-AppxPackage -ErrorAction SilentlyContinue"
+        "Get-AppxPackage -Name '{}' -ErrorAction SilentlyContinue | \
+         Remove-AppxPackage -ErrorAction SilentlyContinue",
+        ps_escape_single(PACKAGE_NAME)
     ));
     Ok(())
 }
 
 fn register_package(msix: &Path, external_location: &Path) -> Result<()> {
+    // Single-quote escape both paths so a username with `'` in it
+    // (`C:\Users\O'Brien\…`) can't break out of the PowerShell literal.
     ps(&format!(
         "Add-AppxPackage -Path '{}' -ExternalLocation '{}'",
-        msix.display(),
-        external_location.display()
+        ps_escape_single(&msix.display().to_string()),
+        ps_escape_single(&external_location.display().to_string())
     ))
     .context("Add-AppxPackage")
 }

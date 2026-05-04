@@ -125,8 +125,15 @@ Filename: "{app}\{#AppExeName}"; \
 ; Remove the shell-extension signing cert from LocalMachine\TrustedPeople.
 ; Best-effort: silently continues if the cert isn't present (per-user
 ; install that never trusted it) or if the process lacks admin rights.
+;
+; Match by FriendlyName ('Offspring Shell Ext Dev Cert') *and*
+; CN=Second March, so we only remove certificates we provisioned —
+; never an unrelated cert that happens to share the CN. This is
+; defense-in-depth against an admin who's installed multiple things
+; under the same Subject; the FriendlyName is set at provisioning time
+; in build-msix.ps1.
 Filename: "powershell.exe"; \
-    Parameters: "-NoProfile -ExecutionPolicy Bypass -Command ""Get-ChildItem Cert:\LocalMachine\TrustedPeople -ErrorAction SilentlyContinue | Where-Object {{ $_.Subject -eq 'CN=Second March' }} | Remove-Item -ErrorAction SilentlyContinue"""; \
+    Parameters: "-NoProfile -ExecutionPolicy Bypass -Command ""Get-ChildItem Cert:\LocalMachine\TrustedPeople -ErrorAction SilentlyContinue | Where-Object {{ $_.Subject -eq 'CN=Second March' -and $_.FriendlyName -eq 'Offspring Shell Ext Dev Cert' }} | Remove-Item -ErrorAction SilentlyContinue"""; \
     RunOnceId: "OffspringCertCleanup"; \
     Flags: runhidden waituntilterminated
 

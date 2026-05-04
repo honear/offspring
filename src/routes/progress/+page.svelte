@@ -137,6 +137,13 @@
     // Outer try/catch so an unexpected throw in the mount chain surfaces
     // to the UI instead of leaving the window frozen at "Preparing…".
     try {
+      // Reveal the window now that Svelte has rendered its first
+      // frame. The Rust side built it with `.visible(false)` so the
+      // empty-WebView2 flash that used to precede the encoder UI no
+      // longer appears. Ignored failures: when the route is reached
+      // via in-place navigation (Custom / Trim → /progress/) the
+      // window is already visible and `show()` is a no-op.
+      void getCurrentWindow().show().catch(() => {});
       phase = "subscribing";
       // Subscribe first so we don't miss early events.
       await api.onProgress((e) => {
