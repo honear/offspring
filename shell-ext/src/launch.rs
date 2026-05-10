@@ -128,6 +128,16 @@ pub fn spawn_make_square(files: &[PathBuf]) {
     let _ = cmd.spawn();
 }
 
+pub fn spawn_modify(files: &[PathBuf]) {
+    let Some(exe) = read_exe_path() else { return };
+    let mut cmd = Command::new(&exe);
+    cmd.arg("modify");
+    for f in files {
+        cmd.arg(f);
+    }
+    let _ = cmd.spawn();
+}
+
 /// Launch the main Offspring UI (the Settings window). No file args —
 /// the CLI `settings` verb ignores any selection and always shows the
 /// configuration surface.

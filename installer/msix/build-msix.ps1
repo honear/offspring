@@ -1,19 +1,36 @@
-# Builds and signs the Offspring shell-extension sparse MSIX package.
+# Builds and signs the Offspring shell-extension sparse MSIX packages.
+#
+# THREE packages are produced from a single AppxManifest template, each
+# with its own Identity Name + DisplayName + Verb Id + CLSID:
+#
+#   * Unified   ("Offspring")          — used when modern_menu_split_layout = false
+#   * Presets   ("Offspring Presets")  — used when split is on
+#   * Tools     ("Offspring Tools")    — used when split is on
+#
+# Each MSIX has a distinct package identity so Win11's modern shell
+# doesn't auto-group their verbs under a single parent. At runtime the
+# app's `modern_menu::sync` registers either {Unified} or {Presets,
+# Tools} depending on the user's toggle.
 #
 # Inputs (relative to repo root):
-#   installer/msix/AppxManifest.xml
+#   installer/msix/AppxManifest.xml                     (template)
 #   src-tauri/icons/StoreLogo.png + Square150x150Logo + Square44x44Logo
-#   <cargo target>/release/offspring_shell_ext.dll  (built by cargo in
-#                                                    shell-ext/ before
-#                                                    this script runs)
+#   <cargo target>/release/offspring_shell_ext.dll      (built by cargo
+#                                                        in shell-ext/
+#                                                        before this
+#                                                        script runs)
 #
 # Outputs:
-#   installer/msix/dist/OffspringShellExt.msix            (signed)
-#   installer/msix/dist/OffspringShellExt.cer             (public cert)
+#   installer/msix/dist/OffspringShellExt.msix            (Unified, signed)
+#   installer/msix/dist/OffspringShellExt.Presets.msix    (Presets, signed)
+#   installer/msix/dist/OffspringShellExt.Tools.msix      (Tools, signed)
+#   installer/msix/dist/OffspringShellExt.cer             (public cert,
+#                                                          one cert signs
+#                                                          all three)
 #
-# The .cer is consumed by the installer — it goes into the user's
-# `Cert:\CurrentUser\TrustedPeople` store when they toggle the modern
-# right-click menu on. Without it Windows refuses to register the MSIX.
+# The .cer is consumed by the installer — it goes into the machine's
+# `Cert:\LocalMachine\TrustedPeople` store at install time. Without it
+# Windows refuses to register any of the three MSIX packages.
 #
 # Certificate lifecycle:
 #   - First build on a fresh machine creates $certPath (a .pfx) if it
@@ -57,7 +74,36 @@ if ($env:OFFSPRING_PFX_PATH) {
     $certPath = Join-Path $certDir "offspring-shellext.pfx"
 }
 $certCer  = Join-Path $distDir "OffspringShellExt.cer"
-$msixOut  = Join-Path $distDir "OffspringShellExt.msix"
+
+# Variant table — single source of truth for the per-package fields.
+# Each entry generates one MSIX file by substituting placeholders in
+# AppxManifest.xml. CLSIDs MUST match shell-ext/src/lib.rs.
+$variants = @(
+    @{
+        Name        = "Unified"
+        Identity    = "SecondMarch.Offspring.ShellExt"
+        DisplayName = "Offspring"
+        VerbId      = "OffspringRoot"
+        Clsid       = "4A8F1E2B-6C9D-4E1F-8A2B-3C4D5E6F7A8B"
+        MsixName    = "OffspringShellExt.msix"
+    },
+    @{
+        Name        = "Presets"
+        Identity    = "SecondMarch.Offspring.PresetsShellExt"
+        DisplayName = "Offspring Presets"
+        VerbId      = "OffspringPresetsRoot"
+        Clsid       = "4A8F1E2B-6C9D-4E1F-8A2B-3C4D5E6F7A8C"
+        MsixName    = "OffspringShellExt.Presets.msix"
+    },
+    @{
+        Name        = "Tools"
+        Identity    = "SecondMarch.Offspring.ToolsShellExt"
+        DisplayName = "Offspring Tools"
+        VerbId      = "OffspringToolsRoot"
+        Clsid       = "4A8F1E2B-6C9D-4E1F-8A2B-3C4D5E6F7A8D"
+        MsixName    = "OffspringShellExt.Tools.msix"
+    }
+)
 
 # -- tool discovery ----------------------------------------------------
 # MakeAppx / SignTool live under the Windows 10 SDK. Look up the newest
@@ -121,14 +167,15 @@ if (-not (Test-Path $certPath)) {
     }
 }
 
-# -- stage package contents --------------------------------------------
-# Only the manifest + icons go into the MSIX. The DLL and offspring.exe
+# -- stage + pack + sign each variant ----------------------------------
+# Only the manifest + icons go into each MSIX. The DLL and offspring.exe
 # live in the install directory (ExternalLocation) and are picked up at
 # Add-AppxPackage time.
-Remove-Item -Recurse -Force $stageDir -ErrorAction SilentlyContinue | Out-Null
-New-Item -ItemType Directory -Force -Path "$stageDir\Assets" | Out-Null
-
-Copy-Item (Join-Path $msixDir "AppxManifest.xml") $stageDir -Force
+#
+# Each variant gets its own subdirectory under stage/ so a parallel
+# rebuild of one doesn't clobber another's manifest.
+$templatePath = Join-Path $msixDir "AppxManifest.xml"
+$templateRaw  = Get-Content $templatePath -Raw
 
 $logos = @(
     "StoreLogo.png",
@@ -140,28 +187,45 @@ foreach ($logo in $logos) {
     if (-not (Test-Path $src)) {
         throw "Missing icon $src — expected from Tauri icon generation."
     }
-    Copy-Item $src (Join-Path $stageDir "Assets\$logo") -Force
 }
 
-# Rewrite the <Identity Version=""> in-place so tags drive the version
-# without a second source of truth.
-$manifestDst = Join-Path $stageDir "AppxManifest.xml"
-(Get-Content $manifestDst -Raw) `
-    -replace 'Version="\d+\.\d+\.\d+\.\d+"', ('Version="{0}"' -f $Version) |
-    Set-Content $manifestDst -Encoding UTF8
+$builtMsix = @()
+foreach ($v in $variants) {
+    $variantStage = Join-Path $stageDir $v.Name
+    Remove-Item -Recurse -Force $variantStage -ErrorAction SilentlyContinue | Out-Null
+    New-Item -ItemType Directory -Force -Path "$variantStage\Assets" | Out-Null
 
-# -- pack --------------------------------------------------------------
-Remove-Item -Force $msixOut -ErrorAction SilentlyContinue
-Write-Host "Packing MSIX..."
-& $makeAppx pack /d $stageDir /p $msixOut /nv
-if ($LASTEXITCODE -ne 0) { throw "MakeAppx failed ($LASTEXITCODE)" }
+    foreach ($logo in $logos) {
+        Copy-Item (Join-Path $iconsSrc $logo) (Join-Path $variantStage "Assets\$logo") -Force
+    }
 
-# -- sign --------------------------------------------------------------
-Write-Host "Signing MSIX..."
-& $signTool sign /fd SHA256 /a /f $certPath /p $PfxPassword $msixOut
-if ($LASTEXITCODE -ne 0) { throw "SignTool failed ($LASTEXITCODE)" }
+    # Substitute placeholders (Identity Name, DisplayName, Verb Id,
+    # CLSID) plus the Version regex-replace. Each variant's manifest is
+    # a string-replace over the shared template — no second template
+    # file to keep in sync.
+    $manifestStr = $templateRaw `
+        -replace '__IDENTITY_NAME__', $v.Identity `
+        -replace '__DISPLAY_NAME__',  $v.DisplayName `
+        -replace '__VERB_ID__',       $v.VerbId `
+        -replace '__CLSID__',         $v.Clsid `
+        -replace 'Version="\d+\.\d+\.\d+\.\d+"', ('Version="{0}"' -f $Version)
+    $manifestDst = Join-Path $variantStage "AppxManifest.xml"
+    Set-Content -Path $manifestDst -Value $manifestStr -Encoding UTF8
+
+    $msixOut = Join-Path $distDir $v.MsixName
+    Remove-Item -Force $msixOut -ErrorAction SilentlyContinue
+    Write-Host ("Packing {0} -> {1}..." -f $v.Name, (Split-Path $msixOut -Leaf))
+    & $makeAppx pack /d $variantStage /p $msixOut /nv
+    if ($LASTEXITCODE -ne 0) { throw ("MakeAppx failed for {0} ({1})" -f $v.Name, $LASTEXITCODE) }
+
+    Write-Host ("Signing {0}..." -f $v.Name)
+    & $signTool sign /fd SHA256 /a /f $certPath /p $PfxPassword $msixOut
+    if ($LASTEXITCODE -ne 0) { throw ("SignTool failed for {0} ({1})" -f $v.Name, $LASTEXITCODE) }
+
+    $builtMsix += $msixOut
+}
 
 Write-Host ""
 Write-Host "OK. Outputs:"
-Write-Host "  $msixOut"
+foreach ($m in $builtMsix) { Write-Host "  $m" }
 Write-Host "  $certCer"

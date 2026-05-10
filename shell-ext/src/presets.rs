@@ -28,6 +28,13 @@ pub struct Preset {
 pub struct Settings {
     #[serde(default)]
     pub tools: ToolsSettings,
+    /// When true, the modern menu renders two top-level entries
+    /// ("Offspring Presets" + "Offspring Tools") instead of the
+    /// default single "Offspring" entry. We deserialize the same
+    /// field name the main app writes, so flipping the toggle in
+    /// Settings is picked up by the DLL on the next menu open.
+    #[serde(default)]
+    pub modern_menu_split_layout: Option<bool>,
 }
 
 #[derive(Deserialize, Clone, Debug, Default)]
@@ -46,6 +53,8 @@ pub struct ToolsSettings {
     pub invert: InvertTool,
     #[serde(default)]
     pub make_square: MakeSquareTool,
+    #[serde(default)]
+    pub modify: ModifyTool,
 }
 
 #[derive(Deserialize, Clone, Debug)]
@@ -124,6 +133,17 @@ pub struct MakeSquareTool {
 }
 
 impl Default for MakeSquareTool {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
+}
+
+#[derive(Deserialize, Clone, Debug)]
+pub struct ModifyTool {
+    pub enabled: bool,
+}
+
+impl Default for ModifyTool {
     fn default() -> Self {
         Self { enabled: true }
     }

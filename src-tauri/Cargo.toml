@@ -1,6 +1,6 @@
 [package]
 name = "offspring"
-version = "0.3.47"
+version = "0.4.1"
 description = "Offspring — right-click convert videos/images with FFmpeg"
 authors = ["Second March"]
 edition = "2021"
@@ -13,7 +13,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = [] }
+tauri = { version = "2", features = ["protocol-asset"] }
 tauri-plugin-opener = "2"
 tauri-plugin-dialog = "2"
 # Single-instance + argv-forwarding IPC: Explorer's classic-menu

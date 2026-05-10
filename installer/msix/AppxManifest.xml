@@ -1,16 +1,30 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  Sparse MSIX manifest for the Offspring Windows 11 modern right-click
-  menu handler.
+  Sparse MSIX manifest TEMPLATE for the Offspring Windows 11 modern
+  right-click menu handler.
 
-  "Sparse" means:
-    * Content (offspring.exe, offspring_shell_ext.dll, icons) lives at
-      the path passed to `Add-AppxPackage -ExternalLocation <...>`.
-    * The MSIX file itself carries only this manifest + a small assets
-      folder used for the appx registration UI.
+  "Sparse" means content (offspring.exe, offspring_shell_ext.dll, icons)
+  lives at the path passed to `Add-AppxPackage -ExternalLocation <...>`.
+  The MSIX file itself carries only this manifest + a small assets
+  folder used for the appx registration UI.
 
-  The CLSID below MUST match shell-ext/src/lib.rs (ROOT_CLSID). If you
-  change one, change both and `Remove-AppxPackage` the old identity.
+  This file is a TEMPLATE consumed by `build-msix.ps1`, which generates
+  three concrete manifests by substituting:
+    __IDENTITY_NAME__   — package identity (Add-AppxPackage matches on
+                          this; differs per variant so Win11 doesn't
+                          auto-group multiple verbs under one parent)
+    __DISPLAY_NAME__    — the label users see in the right-click menu
+    __VERB_ID__         — desktop5:Verb Id (any unique string)
+    __CLSID__           — both com:Class and desktop5:Verb point at it
+    Version="…"         — bumped per build (regex-replaced)
+
+  The three variants live in the same source tree because they share
+  every other field. Each one signs separately but with the same cert.
+
+  CLSIDs MUST match `shell-ext/src/lib.rs`:
+    7A8B = ROOT_CLSID         (unified "Offspring")
+    7A8C = PRESETS_ROOT_CLSID ("Offspring Presets")
+    7A8D = TOOLS_ROOT_CLSID   ("Offspring Tools")
 
   Identity Name / Publisher are what Add-AppxPackage matches on — the
   cert CN must match Publisher exactly, and changing either field
@@ -28,13 +42,13 @@
   IgnorableNamespaces="uap uap3 uap10 rescap com desktop4 desktop5">
 
   <Identity
-    Name="SecondMarch.Offspring.ShellExt"
+    Name="__IDENTITY_NAME__"
     Publisher="CN=Second March"
     Version="0.2.0.0"
     ProcessorArchitecture="x64" />
 
   <Properties>
-    <DisplayName>Offspring Shell Extension</DisplayName>
+    <DisplayName>__DISPLAY_NAME__</DisplayName>
     <PublisherDisplayName>Second March</PublisherDisplayName>
     <Logo>Assets\StoreLogo.png</Logo>
     <!-- Lets the package reference files (including the DLL) from the
@@ -58,7 +72,7 @@
       Executable="offspring.exe"
       EntryPoint="Windows.FullTrustApplication">
       <uap:VisualElements
-        DisplayName="Offspring"
+        DisplayName="__DISPLAY_NAME__"
         Description="Right-click video/image conversion presets powered by FFmpeg"
         BackgroundColor="transparent"
         Square150x150Logo="Assets\Square150x150Logo.png"
@@ -69,28 +83,35 @@
 
       <Extensions>
         <!-- Register the in-proc COM server (our DLL). Threading model
-             STA is required for shell extensions that touch UI. -->
+             STA is required for shell extensions that touch UI.
+
+             Exactly ONE CLSID per package. Three packages (Unified /
+             Presets / Tools) means three independent MSIX identities,
+             each registering its own single verb. Win11's modern menu
+             only auto-groups when MULTIPLE verbs come from a single
+             package, so this layout keeps each top-level entry
+             ungrouped while still letting us register them selectively. -->
         <com:Extension Category="windows.comServer">
           <com:ComServer>
             <com:SurrogateServer DisplayName="Offspring Command">
               <com:Class
-                Id="4A8F1E2B-6C9D-4E1F-8A2B-3C4D5E6F7A8B"
+                Id="__CLSID__"
                 Path="offspring_shell_ext.dll"
                 ThreadingModel="STA" />
             </com:SurrogateServer>
           </com:ComServer>
         </com:Extension>
 
-        <!-- Attach that CLSID to the Windows 11 modern right-click menu
-             for every file type. Children (preset verbs) are driven
-             dynamically by the DLL via IEnumExplorerCommand — nothing
-             to list here. -->
+        <!-- Attach the CLSID to the Windows 11 modern right-click menu
+             for every file type. Children (preset / tool verbs) are
+             driven dynamically by the DLL via IEnumExplorerCommand —
+             nothing to list here. -->
         <desktop4:Extension Category="windows.fileExplorerContextMenus">
           <desktop4:FileExplorerContextMenus>
             <desktop5:ItemType Type="*">
               <desktop5:Verb
-                Id="OffspringRoot"
-                Clsid="4A8F1E2B-6C9D-4E1F-8A2B-3C4D5E6F7A8B" />
+                Id="__VERB_ID__"
+                Clsid="__CLSID__" />
             </desktop5:ItemType>
           </desktop4:FileExplorerContextMenus>
         </desktop4:Extension>

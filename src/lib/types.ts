@@ -59,6 +59,13 @@ export interface Settings {
    *  an MSIX sparse package. Off by default; flipping on prompts the user
    *  to trust our self-signed cert. */
   modern_menu_enabled?: boolean | null;
+  /** When `true`, the Win11 modern menu shows TWO top-level entries
+   *  ("Offspring Presets" + "Offspring Tools") instead of the default
+   *  single unified "Offspring" entry. Mirrors what the classic menu
+   *  already does. Off by default. The shell-ext DLL reads this at
+   *  flyout-open time; toggling takes effect immediately without an
+   *  Explorer restart. */
+  modern_menu_split_layout?: boolean | null;
   /** Extension tools: auto-sequence detection, merge, etc. Always present
    *  — Rust fills in defaults for missing fields when loading old settings. */
   tools?: ToolsSettings;
@@ -73,6 +80,14 @@ export interface ToolsSettings {
   trim: TrimTool;
   invert: InvertTool;
   make_square: MakeSquareTool;
+  modify: ModifyTool;
+}
+
+/** "Modify..." multi-purpose dialog: crop / flip / reverse /
+ *  overwrite. UI lives in /modify; this tool entry just gates
+ *  whether it appears in the right-click flyout. */
+export interface ModifyTool {
+  enabled: boolean;
 }
 
 /** Image color invert with optional 0/255 clamp on every channel

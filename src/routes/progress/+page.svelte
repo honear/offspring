@@ -184,6 +184,23 @@
       const isTrim = search.get("mode") === "trim";
       const trimStart = Math.max(0, parseInt(search.get("start") ?? "0", 10) || 0);
       const trimEnd = Math.max(0, parseInt(search.get("end") ?? "0", 10) || 0);
+      // Modify mode — driven by the in-place navigation from
+      // /modify/. Carries crop x/y/w/h plus flip/reverse/overwrite
+      // booleans. crop_w == 0 || crop_h == 0 means "no crop, only
+      // the other transforms" — backend special-cases that.
+      const isModifyFromUrl = search.get("mode") === "modify";
+      const modifyCropX = Math.max(0, parseInt(search.get("x") ?? "0", 10) || 0);
+      const modifyCropY = Math.max(0, parseInt(search.get("y") ?? "0", 10) || 0);
+      const modifyCropW = Math.max(0, parseInt(search.get("w") ?? "0", 10) || 0);
+      const modifyCropH = Math.max(0, parseInt(search.get("h") ?? "0", 10) || 0);
+      const modifyFlipH = search.get("fh") === "1";
+      const modifyFlipV = search.get("fv") === "1";
+      const modifyReverse = search.get("rev") === "1";
+      // "Remove audio" is its own transform — counts toward the
+      // any-transform validity check on the backend, so the dialog
+      // can dispatch it alone (no crop, no flip, no reverse).
+      const modifyRemoveAudio = search.get("ra") === "1";
+      const modifyOverwrite = search.get("ow") === "1";
       // Optional middle-range cut. Both `from` and `to` must be present
       // for the cut to take effect; missing or partial → no cut.
       const fromParam = search.get("from");
@@ -223,7 +240,7 @@
       }
       // Tool paths derive their own settings from the inputs, so they
       // don't need a resolved preset.
-      const isTool = isMerge || isGrayscale || isCompare || isOverlay || isTrim || isInvert || isMakeSquare;
+      const isTool = isMerge || isGrayscale || isCompare || isOverlay || isTrim || isInvert || isMakeSquare || isModifyFromUrl;
       if (!isTool && !preset) {
         errored = true;
         errorMsg = `No preset was resolved (presetId=${presetId ?? "null"}, customPreset=${customPreset ? "present" : "null"}). The shortcut may be stale.`;
@@ -257,7 +274,9 @@
                   ? "starting invert"
                   : isMakeSquare
                     ? "starting make square"
-                    : "starting encode";
+                    : isModifyFromUrl
+                      ? "starting modify"
+                      : "starting encode";
       armStallTimer();
       didStart = true;
       if (isTrim) {
@@ -286,6 +305,27 @@
         await api.encodeInvert(files);
       } else if (isMakeSquare) {
         await api.encodeMakeSquare(files);
+      } else if (isModifyFromUrl) {
+        // crop_w / crop_h == 0 is allowed — means "no crop, just the
+        // other transforms". Backend rejects only the case where
+        // EVERY transform is off.
+        const anyTransform =
+          (modifyCropW > 0 && modifyCropH > 0) ||
+          modifyFlipH ||
+          modifyFlipV ||
+          modifyReverse ||
+          modifyRemoveAudio;
+        if (!anyTransform) {
+          errored = true;
+          errorMsg = "Modify was started without any transforms. Open the Modify dialog and pick at least one.";
+          finish(0);
+          return;
+        }
+        await api.encodeModify(
+          files,
+          modifyCropX, modifyCropY, modifyCropW, modifyCropH,
+          modifyFlipH, modifyFlipV, modifyReverse, modifyRemoveAudio, modifyOverwrite,
+        );
       } else {
         await api.encode(files, preset!);
       }
@@ -303,7 +343,9 @@
                   ? "inverting"
                   : isMakeSquare
                     ? "making square"
-                    : "encoding";
+                    : isModifyFromUrl
+                      ? "modifying"
+                      : "encoding";
     } catch (err) {
       // Anything that throws — listen(), invoke() failure, serde rejection,
       // FFmpeg-not-found — lands here and surfaces to the user.

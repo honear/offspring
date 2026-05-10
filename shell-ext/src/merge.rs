@@ -53,14 +53,21 @@ impl IExplorerCommand_Impl for MergeCommand_Impl {
     /// turned the Merge tool on. `ECS_HIDDEN` removes the entry from
     /// the flyout entirely — contrast with `ECS_DISABLED` which would
     /// leave a greyed-out row.
+    ///
+    /// `items: None` is treated as permissive — see `grayscale.rs`
+    /// for the Win11 nested-sub-flyout quirk that necessitates this.
+    /// Invoke validates the real count and emits a clear error if a
+    /// user clicks Merge with only one file selected.
     fn GetState(&self, items: Option<&IShellItemArray>, _okaysub: BOOL) -> Result<u32> {
-        let count = unsafe { items.and_then(|arr| arr.GetCount().ok()).unwrap_or(0) };
         let enabled = load_settings().tools.merge.enabled;
-        if count < 2 || !enabled {
-            Ok(ECS_HIDDEN.0 as u32)
-        } else {
-            Ok(ECS_ENABLED.0 as u32)
+        if !enabled {
+            return Ok(ECS_HIDDEN.0 as u32);
         }
+        let count_ok = match items {
+            Some(arr) => unsafe { arr.GetCount().ok().unwrap_or(2) >= 2 },
+            None => true,
+        };
+        if count_ok { Ok(ECS_ENABLED.0 as u32) } else { Ok(ECS_HIDDEN.0 as u32) }
     }
 
     fn Invoke(&self, items: Option<&IShellItemArray>, _bind: Option<&IBindCtx>) -> Result<()> {

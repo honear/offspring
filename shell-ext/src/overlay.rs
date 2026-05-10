@@ -42,14 +42,19 @@ impl IExplorerCommand_Impl for OverlayCommand_Impl {
         Ok(GUID::zeroed())
     }
 
+    /// See `grayscale.rs` for why we treat `items: None` as permissive
+    /// rather than zero-count — it's the Win11 nested-sub-flyout quirk
+    /// where Explorer skips passing the array to leaf GetState calls.
     fn GetState(&self, items: Option<&IShellItemArray>, _okaysub: BOOL) -> Result<u32> {
-        let count = unsafe { items.and_then(|arr| arr.GetCount().ok()).unwrap_or(0) };
         let enabled = load_settings().tools.overlay.enabled;
-        if count < 1 || !enabled {
-            Ok(ECS_HIDDEN.0 as u32)
-        } else {
-            Ok(ECS_ENABLED.0 as u32)
+        if !enabled {
+            return Ok(ECS_HIDDEN.0 as u32);
         }
+        let count_ok = match items {
+            Some(arr) => unsafe { arr.GetCount().ok().unwrap_or(1) >= 1 },
+            None => true,
+        };
+        if count_ok { Ok(ECS_ENABLED.0 as u32) } else { Ok(ECS_HIDDEN.0 as u32) }
     }
 
     fn Invoke(&self, items: Option<&IShellItemArray>, _bind: Option<&IBindCtx>) -> Result<()> {

@@ -37,6 +37,16 @@ export const saveTrimLast = (trim: TrimLast) => invoke<void>("save_trim_last", {
 export const syncIntegrations = () => invoke<void>("sync_integrations");
 export const restartExplorer = () => invoke<void>("restart_explorer");
 export const openDataFolder = () => invoke<void>("open_data_folder");
+/** Open `%LOCALAPPDATA%\Offspring` in Explorer with `debug.log`
+ *  selected (or just the directory when the log doesn't exist yet). */
+export const openLogFolder = () => invoke<void>("open_log_folder");
+
+/** Hand off an http(s) URL to the user's default browser (via the
+ *  Windows shell). Replaces `@tauri-apps/plugin-opener`'s `openUrl`
+ *  for our brand-link click — the JS path was failing silently in
+ *  WebView2. The Rust side rejects non-http(s) schemes. */
+export const openExternalUrl = (url: string) =>
+  invoke<void>("open_external_url", { url });
 
 export const encode = (files: string[], preset: Preset) =>
   invoke<void>("encode", { files, preset });
@@ -77,6 +87,52 @@ export const encodeInvert = (files: string[]) =>
 export const encodeMakeSquare = (files: string[]) =>
   invoke<void>("encode_make_square", { files });
 
+/** Modify tool: per-file crop + optional flip / reverse / overwrite.
+ *  Same set of transforms applied to every file. `cropW=0` and
+ *  `cropH=0` means "no crop, only the other transforms". */
+export const encodeModify = (
+  files: string[],
+  cropX: number,
+  cropY: number,
+  cropW: number,
+  cropH: number,
+  flipH: boolean,
+  flipV: boolean,
+  reverse: boolean,
+  removeAudio: boolean,
+  overwrite: boolean,
+) =>
+  invoke<void>("encode_modify", {
+    files,
+    cropX,
+    cropY,
+    cropW,
+    cropH,
+    flipH,
+    flipV,
+    reverse,
+    removeAudio,
+    overwrite,
+  });
+
+/** Stash files in app state ahead of the Modify dialog navigating
+ *  to /progress/. Mirrors `prepareTrimEncode` — no second window
+ *  opens. */
+export const prepareModifyEncode = (files: string[]) =>
+  invoke<void>("prepare_modify_encode", { files });
+
+/** Probe (width, height) of a file. Returns null when ffprobe can't
+ *  read it. The Crop dialog uses this to set up coordinate mapping. */
+export const probeDimensions = (path: string) =>
+  invoke<[number, number] | null>("probe_dimensions", { path });
+
+/** Extract one preview frame to a JPEG and return its absolute path.
+ *  The Crop dialog calls this when WebView2 can't decode a video
+ *  natively (ProRes / DNxHD / weird MKVs); the result is displayed
+ *  via `<img>` instead of `<video>`. */
+export const extractPreviewFrame = (path: string, timeSeconds: number) =>
+  invoke<string>("extract_preview_frame", { path, timeSeconds });
+
 /** Trim encode: strip `startFrames` from the front and `endFrames`
  *  from the back of each input, and optionally cut the inclusive
  *  range `[removeFrom, removeTo]` from the middle. Per-file
@@ -110,6 +166,7 @@ export const getPendingOverlay = () => invoke<boolean>("get_pending_overlay");
 export const getPendingTrimDialog = () => invoke<boolean>("get_pending_trim_dialog");
 export const getPendingInvert = () => invoke<boolean>("get_pending_invert");
 export const getPendingMakeSquare = () => invoke<boolean>("get_pending_make_square");
+export const getPendingModifyDialog = () => invoke<boolean>("get_pending_modify_dialog");
 
 /** Stash files + custom preset in app state ahead of navigating the current
  * webview to the progress route. Unlike the old `start_custom_encode`, this

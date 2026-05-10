@@ -51,14 +51,25 @@ impl IExplorerCommand_Impl for GrayscaleCommand_Impl {
     /// Hide when the tool is disabled. Unlike Merge we show for any
     /// selection count ≥1 because greyscaling a single file is a
     /// perfectly reasonable operation.
+    ///
+    /// When `items` is `None` we treat that as "Explorer didn't tell us
+    /// the selection size" rather than "the selection is empty". Inside
+    /// a nested sub-flyout (Tools ▶ Greyscale) Win11 sometimes skips
+    /// passing the `IShellItemArray` down to leaf `GetState` calls; if
+    /// we treated that as a zero count the entire Tools flyout rendered
+    /// empty. Invoke still gets a real array, so the worst case here is
+    /// the entry being clickable on a literal empty selection, which
+    /// the `*` ItemType filter already prevents.
     fn GetState(&self, items: Option<&IShellItemArray>, _okaysub: BOOL) -> Result<u32> {
-        let count = unsafe { items.and_then(|arr| arr.GetCount().ok()).unwrap_or(0) };
         let enabled = load_settings().tools.grayscale.enabled;
-        if count < 1 || !enabled {
-            Ok(ECS_HIDDEN.0 as u32)
-        } else {
-            Ok(ECS_ENABLED.0 as u32)
+        if !enabled {
+            return Ok(ECS_HIDDEN.0 as u32);
         }
+        let count_ok = match items {
+            Some(arr) => unsafe { arr.GetCount().ok().unwrap_or(1) >= 1 },
+            None => true,
+        };
+        if count_ok { Ok(ECS_ENABLED.0 as u32) } else { Ok(ECS_HIDDEN.0 as u32) }
     }
 
     fn Invoke(&self, items: Option<&IShellItemArray>, _bind: Option<&IBindCtx>) -> Result<()> {

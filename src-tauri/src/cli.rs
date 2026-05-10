@@ -77,6 +77,15 @@ pub enum Command {
     MakeSquare {
         files: Vec<PathBuf>,
     },
+    /// Open the Modify mini-dialog with a preview of the first
+    /// selected file. Lets the user crop, flip horizontally /
+    /// vertically, reverse (video), and optionally overwrite the
+    /// source. Same set of transforms is applied to every selected
+    /// file. Output is `<stem>_modified.<ext>` keeping the source
+    /// format, or replaces the source when overwrite is enabled.
+    Modify {
+        files: Vec<PathBuf>,
+    },
     /// Open the main Offspring settings window. Wired to a trailing
     /// "Offspring settings" entry in the right-click menu so users can
     /// reach the UI without launching the app from Start.

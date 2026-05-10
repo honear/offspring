@@ -110,14 +110,12 @@ pub fn restart_explorer() -> Result<(), String> {
     integration::modern_menu::restart_explorer().map_err(|e| e.to_string())
 }
 
-#[tauri::command]
-pub fn open_data_folder() -> Result<(), String> {
-    let p = paths::data_dir().map_err(|e| e.to_string())?;
-    // Resolve the absolute path to Explorer so a planted `explorer.exe`
-    // in a PATH entry / current dir can't be invoked instead. Falls
-    // back to the bare name if `%SystemRoot%` is unset, which keeps
-    // this working on systems where the env var has been scrubbed.
-    let exe = match std::env::var_os("SystemRoot") {
+/// Resolve `%SystemRoot%\explorer.exe`, falling back to the bare
+/// name on systems where `SystemRoot` is scrubbed. Used by the
+/// folder-opening commands; pulled out so we don't repeat the
+/// path-planting defense logic for each new entry.
+fn explorer_path() -> std::path::PathBuf {
+    match std::env::var_os("SystemRoot") {
         Some(root) => {
             let candidate = std::path::PathBuf::from(root).join("explorer.exe");
             if candidate.exists() {
@@ -127,9 +125,82 @@ pub fn open_data_folder() -> Result<(), String> {
             }
         }
         None => std::path::PathBuf::from("explorer.exe"),
-    };
-    std::process::Command::new(exe)
+    }
+}
+
+#[tauri::command]
+pub fn open_data_folder() -> Result<(), String> {
+    let p = paths::data_dir().map_err(|e| e.to_string())?;
+    std::process::Command::new(explorer_path())
         .arg(&p)
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Open the folder containing the debug log (`%LOCALAPPDATA%\Offspring`)
+/// in Explorer with `debug.log` selected. The `/select,<path>` switch
+/// asks Explorer to open the parent and highlight the file rather
+/// than just navigating to the directory — gives the user a
+/// one-click path to "show me the log so I can copy or delete it".
+///
+/// If the log file doesn't exist yet (no encode has logged anything)
+/// we fall back to opening the parent directory, otherwise Explorer
+/// shows an empty/default view.
+#[tauri::command]
+pub fn open_log_folder() -> Result<(), String> {
+    let log_path = crate::debug_log::log_path()
+        .ok_or_else(|| "Could not resolve debug log path.".to_string())?;
+    let exe = explorer_path();
+    if log_path.exists() {
+        // /select,<path> highlights the file in its parent folder.
+        // The leading comma is required and there's no space after
+        // it — that's how Explorer parses the switch.
+        std::process::Command::new(exe)
+            .arg(format!("/select,{}", log_path.display()))
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    } else {
+        let parent = log_path
+            .parent()
+            .ok_or_else(|| "Log path has no parent directory.".to_string())?;
+        // Make sure the parent exists before asking Explorer to
+        // open it — `local_data_dir()` already creates Offspring/
+        // but the folder could still be missing if the user wiped
+        // it manually.
+        let _ = std::fs::create_dir_all(parent);
+        std::process::Command::new(exe)
+            .arg(parent)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// Hand off an https/http URL to the user's default browser via the
+/// Windows shell's URL association. Used for the "Second March" credit
+/// link in the topbar — the `tauri-plugin-opener` JS API was silently
+/// failing in WebView2 even with `opener:allow-open-url` granted, and
+/// debugging that turned out to be a worse use of time than just doing
+/// the dispatch ourselves.
+///
+/// Implementation: `cmd /c start "" <url>`. The empty `""` is the
+/// window title arg that `start` expects when the second token is
+/// quoted; without it `start "https://…"` interprets the URL as the
+/// title and opens nothing. Using `cmd /c start` rather than
+/// `ShellExecuteW` keeps the call out of any blocking COM context
+/// the webview might be on.
+///
+/// We refuse anything that isn't `http://` or `https://` so this can't
+/// be coerced into running a local file or a wacky URI scheme.
+#[tauri::command]
+pub fn open_external_url(url: String) -> Result<(), String> {
+    let lower = url.to_ascii_lowercase();
+    if !(lower.starts_with("http://") || lower.starts_with("https://")) {
+        return Err(format!("refusing non-http(s) URL: {url}"));
+    }
+    std::process::Command::new("cmd")
+        .args(["/C", "start", "", &url])
         .spawn()
         .map_err(|e| e.to_string())?;
     Ok(())
@@ -781,6 +852,156 @@ pub fn encode_make_square(
     Ok(())
 }
 
+/// Modify tool: per-file rectangular crop + optional flip /
+/// reverse / overwrite. Same set of transforms is applied to every
+/// file (crop rect clamped per-file at encode time so mixed-size
+/// selections don't fail).
+///
+/// `crop_w == 0` or `crop_h == 0` means "no crop" — encoder skips
+/// the crop filter and applies only the other transforms.
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub fn encode_modify(
+    app: tauri::AppHandle,
+    files: Vec<String>,
+    crop_x: u32,
+    crop_y: u32,
+    crop_w: u32,
+    crop_h: u32,
+    flip_h: bool,
+    flip_v: bool,
+    reverse: bool,
+    remove_audio: bool,
+    overwrite: bool,
+) -> Result<(), String> {
+    if files.is_empty() {
+        return Err("Modify needs at least one file".into());
+    }
+    let crop_rect = if crop_w > 0 && crop_h > 0 {
+        Some((crop_x, crop_y, crop_w, crop_h))
+    } else {
+        None
+    };
+    // At least one transform must be active or we'd be doing a
+    // pointless re-encode of the source. "Remove audio" counts —
+    // stripping the audio track is a meaningful change even if the
+    // video bytes pass through unchanged. Frontend disables the
+    // button in this case but defense-in-depth.
+    if crop_rect.is_none() && !flip_h && !flip_v && !reverse && !remove_audio {
+        return Err(
+            "Nothing to modify — pick at least one transform (crop / flip / reverse / remove audio).".into(),
+        );
+    }
+    let settings = presets::load_settings().unwrap_or_default();
+    let ffmpeg_path = ffmpeg::resolve_ffmpeg(&settings).map_err(|e| e.to_string())?;
+    let paths_in: Vec<std::path::PathBuf> =
+        files.iter().map(std::path::PathBuf::from).collect();
+    let total = paths_in.len();
+
+    std::thread::spawn(move || {
+        let app_cl = app.clone();
+        let result = ffmpeg::encode_modify_files(
+            &ffmpeg_path,
+            &paths_in,
+            ffmpeg::ModifySpec {
+                crop_rect,
+                flip_h,
+                flip_v,
+                reverse,
+                remove_audio,
+                overwrite,
+            },
+            &settings,
+            move |ev: ProgressEvent| {
+                let _ = app_cl.emit("encode-progress", ev);
+            },
+        );
+        if let Err(e) = result {
+            let first_display = paths_in
+                .first()
+                .map(|p| p.display().to_string())
+                .unwrap_or_default();
+            let _ = app.emit(
+                "encode-progress",
+                ProgressEvent {
+                    file_index: 1,
+                    total_files: total,
+                    input: first_display,
+                    stage: "error".into(),
+                    percent: None,
+                    message: Some(e.to_string()),
+                },
+            );
+        }
+        let _ = app.emit("encode-finished", total);
+    });
+    Ok(())
+}
+
+/// Stash files in app state ahead of the Modify dialog navigating
+/// to /progress/. Mirrors `prepare_trim_encode` — no second window
+/// is opened; the dialog reuses its own webview to dodge the
+/// Windows WebView2 blank-second-window bug.
+#[tauri::command]
+pub fn prepare_modify_encode(
+    app: tauri::AppHandle,
+    files: Vec<String>,
+) -> Result<(), String> {
+    app.manage_pending_files(files);
+    app.manage_pending_preset(None);
+    app.manage_pending_custom_preset(None);
+    Ok(())
+}
+
+/// Probe (width, height) of a single file. Used by the Crop dialog
+/// to set up display ↔ source pixel coordinate mapping. Returns
+/// `None` when the file can't be probed; the dialog treats that as
+/// an unsupported-input error.
+#[tauri::command]
+pub fn probe_dimensions(path: String) -> Result<Option<(u32, u32)>, String> {
+    let settings = presets::load_settings().unwrap_or_default();
+    let ffmpeg_path = ffmpeg::resolve_ffmpeg(&settings).map_err(|e| e.to_string())?;
+    Ok(ffmpeg::probe_dimensions(&ffmpeg_path, std::path::Path::new(&path)))
+}
+
+/// Extract a preview frame at `time_seconds` to a JPEG in the app's
+/// temp dir, returning the path. The Crop dialog calls this when its
+/// `<video>` element fails to decode the source natively (ProRes,
+/// DNxHD, weird MKVs) — falls back to displaying the still.
+///
+/// Cleanup: the temp file gets a per-process-id-and-nonce name and
+/// lives in `%LOCALAPPDATA%\Offspring\tmp\`. The OS reaps the dir on
+/// reboot via standard temp-cleanup; we don't bother tracking
+/// individual files because they're tiny and short-lived.
+#[tauri::command]
+pub fn extract_preview_frame(
+    path: String,
+    time_seconds: f64,
+) -> Result<String, String> {
+    let settings = presets::load_settings().unwrap_or_default();
+    let ffmpeg_path = ffmpeg::resolve_ffmpeg(&settings).map_err(|e| e.to_string())?;
+
+    let tmp_dir = paths::tmp_dir().map_err(|e| e.to_string())?;
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let out = tmp_dir.join(format!(
+        "preview-{}-{nonce}.jpg",
+        std::process::id()
+    ));
+
+    ffmpeg::extract_preview_frame(
+        &ffmpeg_path,
+        std::path::Path::new(&path),
+        time_seconds,
+        &out,
+    )
+    .map_err(|e| e.to_string())?;
+
+    Ok(out.to_string_lossy().into_owned())
+}
+
 /// Trim tool: per-file frame-accurate trim. Strips `start_frames` from
 /// the front and `end_frames` from the back of each input, and
 /// optionally cuts the inclusive range `[remove_from, remove_to]` out
@@ -949,6 +1170,34 @@ pub fn open_custom_window(app: &tauri::AppHandle, files: Vec<String>) -> anyhow:
 /// enough for `set_focus` to actually move the foreground to us; we
 /// drop always-on-top right away so the user can later put another
 /// window over the dialog if they want to.
+/// Open the Modify mini dialog. Bigger than Trim/Custom because it
+/// has to fit a media preview plus the crop overlay UI plus the
+/// numeric inputs plus the transform toggles. Resizable so users
+/// with high-DPI displays or large source media can scale up. The
+/// window is built invisible so the Svelte route mounts before the
+/// OS window appears (avoids a blank-frame flash); the frontend
+/// reveals it after first paint.
+pub fn open_modify_window(app: &tauri::AppHandle, files: Vec<String>) -> anyhow::Result<()> {
+    let (pw, ph) = (920.0, 760.0);
+    let mut b = WebviewWindowBuilder::new(app, "modify", WebviewUrl::App("modify/".into()))
+        .title("Offspring — Modify")
+        .inner_size(pw, ph)
+        .min_inner_size(640.0, 520.0)
+        .resizable(true)
+        .focused(true)
+        .visible(false);
+    if let Some((x, y)) = position_near_cursor(app, pw, ph) {
+        b = b.position(x, y);
+    }
+    let w = b.build()?;
+    app.manage_pending_files(files);
+    let _ = w.unminimize();
+    let _ = w.set_always_on_top(true);
+    let _ = w.set_focus();
+    let _ = w.set_always_on_top(false);
+    Ok(())
+}
+
 pub fn open_trim_window(app: &tauri::AppHandle, files: Vec<String>) -> anyhow::Result<()> {
     let (pw, ph) = (440.0, 420.0);
     let mut b = WebviewWindowBuilder::new(app, "trim", WebviewUrl::App("trim/".into()))
@@ -1013,6 +1262,12 @@ pub struct PendingState {
     pub invert: std::sync::Mutex<bool>,
     /// True when the progress window should route to `encode_make_square`.
     pub make_square: std::sync::Mutex<bool>,
+    /// True when the user invoked `offspring modify <files>` and
+    /// the Modify dialog should open. Mirrors `trim_dialog` — the
+    /// dialog reads pending files, lets the user pick transforms
+    /// (crop / flip / reverse / overwrite), then drives
+    /// `prepare_modify_encode` + navigates to /progress/ in-place.
+    pub modify_dialog: std::sync::Mutex<bool>,
 }
 
 pub trait AppHandleExt {
@@ -1026,6 +1281,7 @@ pub trait AppHandleExt {
     fn manage_pending_trim_dialog(&self, v: bool);
     fn manage_pending_invert(&self, v: bool);
     fn manage_pending_make_square(&self, v: bool);
+    fn manage_pending_modify_dialog(&self, v: bool);
 }
 
 impl AppHandleExt for tauri::AppHandle {
@@ -1079,6 +1335,16 @@ impl AppHandleExt for tauri::AppHandle {
             *state.make_square.lock().unwrap() = v;
         }
     }
+    fn manage_pending_modify_dialog(&self, v: bool) {
+        if let Some(state) = self.try_state::<PendingState>() {
+            *state.modify_dialog.lock().unwrap() = v;
+        }
+    }
+}
+
+#[tauri::command]
+pub fn get_pending_modify_dialog(state: tauri::State<'_, PendingState>) -> bool {
+    *state.modify_dialog.lock().unwrap()
 }
 
 #[tauri::command]

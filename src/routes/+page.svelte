@@ -9,7 +9,7 @@
   let presets = $state<Preset[]>([]);
   let selectedId = $state<string | null>(null);
   let selectedToolId = $state<
-    "sequence" | "merge" | "grayscale" | "compare" | "overlay" | "trim" | "invert" | "make_square" | null
+    "sequence" | "merge" | "grayscale" | "compare" | "overlay" | "trim" | "invert" | "make_square" | "modify" | null
   >(null);
   let settings = $state<Settings>({});
   let ffmpeg = $state<FfmpegStatus>({ found: false, path: null });
@@ -125,6 +125,11 @@
       name: "Make Square",
       blurb: "Pad shorter edge of an image to match the longer one",
     },
+    {
+      id: "modify" as const,
+      name: "Modify",
+      blurb: "Crop, flip, reverse — visual dialog with scrubbable preview",
+    },
   ];
 
   /** Ensure `settings.tools` exists with full defaults — the Rust side
@@ -202,6 +207,7 @@
       settings.tools.make_square = { enabled: true, fill_mode: "transparent" };
     if (settings.tools.make_square.fill_mode == null)
       settings.tools.make_square.fill_mode = "transparent";
+    if (!settings.tools.modify) settings.tools.modify = { enabled: true };
     if (!settings.tools.overlay) {
       settings.tools.overlay = {
         enabled: false,
@@ -727,7 +733,13 @@
   <header class="topbar">
     <div class="brand">
       <h1>Offspring</h1>
-      <span class="tiny">Right-click tools powered by FFmpeg <br> Developed by Second March</span>
+      <span class="tiny">Right-click tools powered by FFmpeg <br> Developed by <span
+          class="brand-link"
+          role="link"
+          tabindex="0"
+          onclick={() => api.openExternalUrl("https://secondmarch.xyz/").catch((e) => console.error("openExternalUrl failed", e))}
+          onkeydown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); api.openExternalUrl("https://secondmarch.xyz/").catch((err) => console.error("openExternalUrl failed", err)); } }}
+        >Second March</span></span>
     </div>
 
     <nav class="tabs">
@@ -1256,37 +1268,36 @@
             <h2 class="tool-title">Trim</h2>
           </div>
           <br>
+          <video class="tool-video" src="/examples/trim_low.mp4" autoplay muted loop playsinline></video>
+          <br>
           <p class="muted">
-            Frame-accurate trim. Strips a chosen number of frames from the
+            Frame-accurate trim. Removes a chosen number of frames from the
             start and/or end of each selected file, and (optionally) cuts a
-            specific frame range out of the middle — joining the two surviving
-            spans into one continuous output. Output filename is
+            specific frame range out of the middle — joining the two remaining
+            clips into one continuous output. Output filename is
             <code>&lt;name&gt;_trimmed.&lt;ext&gt;</code>.
           </p>
           <br>
           <p class="muted">
-            Picking <strong>Trim…</strong> from the right-click menu opens a
+            Picking "<strong>Trim…</strong>" from the right-click menu opens a
             small dialog with two side-by-side fields for the start/end strip
             counts, plus an optional "Remove a specific frame range" toggle
-            for the middle cut. The same settings apply to each selected file
-            independently, so multi-select produces one trimmed output per
-            input. Audio (when present) is trimmed in sync at every cut so
+            for a middle cut. Audio (when present) is trimmed in sync at every cut so
             video and sound stay aligned.
           </p>
           <br>
           <p class="muted tiny">
-            Frame boundaries don't line up with MP4 keyframes, so the file
-            has to be re-encoded — but Trim is meant to feel seamless, so
-            quality is pushed to visually-lossless: CRF 17 / preset slow /
-            256k AAC for MP4, and 255-color sierra2_4a-dithered palette for
-            GIF. Use one of the size-tuned presets afterward if you need to
-            shrink the output. <br>
+            Just as a warning, some frame boundaries don't always exactly line up with MP4 keyframes, so the file
+            has to be re-encoded to ensure the audio and video are in sync — but Trim is meant to feel seamless, so
+            quality is pushed to visually-lossless. 
             Enable/disable from the Tools sidebar on the left.
           </p>
         {:else if selectedToolId === "invert"}
           <div class="editor-head">
             <h2 class="tool-title">Invert</h2>
           </div>
+          <br>
+          <video class="tool-video" src="/examples/invert_low.mp4" autoplay muted loop playsinline></video>
           <br>
           <p class="muted">
             Invert the RGB channels of an image — black pixels become
@@ -1318,23 +1329,46 @@
               <span><strong>Clamp to 0/255</strong> — every channel becomes pure black, pure white, or fully transparent / opaque. Off by default; turn on for binary masks.</span>
             </label>
           </div>
+        {:else if selectedToolId === "modify"}
+          <div class="editor-head">
+            <h2 class="tool-title">Modify</h2>
+          </div>
+          <br>
+          <video class="tool-video" src="/examples/modify_low.mp4" autoplay muted loop playsinline></video>
+          <br>
+          <p class="muted">
+            "Modify" is an <strong>all-in-one</strong> transform dialog. It opens a mini window with a preview of your image or video. <br><br> Inside this window, you have access to a variety of tools to modify a particular image or video. It supports rectangular crop with handle-drag + aspect lock,
+            horizontal flip, vertical flip, and reversing video.
+          </p>
+          <br>
+          <p class="muted">
+            Aspect-ratio dropdown locks the rectangle to
+            <code>Free</code>, <code>Original</code>,
+            <code>16:9</code>, <code>9:16</code>, <code>1:1</code>, or
+            <code>4:3</code>. 
+            Output filename will be
+            <code>&lt;name&gt;_modified.&lt;ext&gt;</code> keeping the
+            source format, but if the
+            <strong>Overwrite original</strong> checkbox is on, the
+            original file will be replaced with the modified verison.
+          </p>
+          <br>
+          <p class="muted tiny">
+            "Reverse" buffers every frame in memory before writing — fast
+            on short clips, slow on long ones. Not all formats of video will be suppoted by the playback unfortunately. MP4, Gif, WebM, and other formats should be supported :)
+          </p>
         {:else if selectedToolId === "make_square"}
           <div class="editor-head">
             <h2 class="tool-title">Make Square</h2>
           </div>
           <br>
           <p class="muted">
-            Pad the shorter edge of an image to match the longer one,
-            producing a square output the same width and height. The
-            original image stays centered; the new pixels are either
-            transparent or sampled from the image's edge. Output
-            filename is <code>&lt;name&gt;_square.&lt;ext&gt;</code>
-            (or <code>.png</code> when transparency is requested on a
-            JPEG input — JPEG can't carry an alpha channel).
+            This tool was specifically added to solve a sometimes annoying issue with textures. It will take any image (e.g. a 1800x600px png) and add transparent marging on the smaller side to make it the same width and height. This is especially useful for textures that are not exactly square, but need to be square for UV reasons or just to avoid scaling manually to match the square aspect ratio.
+            
           </p>
           <br>
           <p class="muted tiny">
-            Image-only — refuses video inputs with a clear error.
+            Image-only — will refuse video inputs with a clear error.
             Already-square inputs are skipped (the output would be
             byte-identical so we save the encode pass).
           </p>
@@ -1447,50 +1481,49 @@
         <h3>Right-click menu</h3>
         <p class="muted tiny"><br>
           By default, Offspring lives under Windows 11's "Show more options" (the classic right-click menu).
-          Enabling the modern menu below moves it to the top-level right-click menu — it won't also appear
-          under "Show more options", so you don't end up with two entries. You might have to restart Windows Explorer.
+          Enabling the modern menu below moves it to the top-level right-click menu.
         </p>
-        <br>
+
         <div style="margin-top: 12px; display: flex; flex-direction: column; gap: 10px;">
-          <label class="inline">
-            <input
-              type="checkbox"
-              checked={settings.sendto_enabled ?? false}
-              onchange={(e) => {
-                settings.sendto_enabled = (e.currentTarget as HTMLInputElement).checked;
-                saveSettings();
-              }}
-            />
-            <span>Also add entries to the <strong>Send to</strong> menu</span>
-          </label>
+
           <label class="inline">
             <input
               type="checkbox"
               checked={settings.modern_menu_enabled ?? false}
               onchange={async (e) => {
                 const checked = (e.currentTarget as HTMLInputElement).checked;
-                const wasOff = !(settings.modern_menu_enabled ?? false);
                 settings.modern_menu_enabled = checked;
                 await saveSettings();
-                // Explorer caches the modern-menu handler list — the
-                // new entry only appears once it re-launches. Offer to
-                // do it for the user (loses open Explorer windows) but
-                // never force it.
-                if (checked && wasOff) {
-                  const ok = confirm(
-                    "Modern right-click menu enabled.\n\n" +
-                      "Restart Windows Explorer now so it picks up the new menu? " +
-                      "Any open File Explorer windows will close.\n\n" +
-                      "Cancel to restart later — it will also take effect after sign-out / reboot.",
-                  );
-                  if (ok) {
-                    try { await api.restartExplorer(); } catch (err) { alert(String(err)); }
-                  }
-                }
+                // Explorer caches the modern-menu handler list — new
+                // CLSIDs only become visible once Explorer re-launches.
+                // We restart unconditionally so the user gets a
+                // consistent "flip toggle → menu updates" experience.
+                try { await api.restartExplorer(); } catch (err) { alert(String(err)); }
               }}
             />
             <span>Integrate with the <strong>Windows 11 right-click menu</strong></span>
           </label>
+          <label class="inline" title="When on, the modern right-click menu shows TWO separate top-level entries — Offspring Presets and Offspring Tools — instead of one unified Offspring entry. Mirrors the classic right-click menu's split layout. Toggling registers / unregisters separate MSIX packages, so an Explorer restart fires automatically. Disabled when the modern menu integration itself is off.">
+            <input
+              type="checkbox"
+              checked={settings.modern_menu_split_layout ?? false}
+              disabled={!(settings.modern_menu_enabled ?? false)}
+              onchange={async (e) => {
+                settings.modern_menu_split_layout = (e.currentTarget as HTMLInputElement).checked;
+                await saveSettings();
+                // Toggling swaps which MSIX packages are registered
+                // (Unified ↔ Presets+Tools); Explorer needs to be
+                // restarted to drop its cached shell-ext list and
+                // pick up the new top-level entries.
+                try { await api.restartExplorer(); } catch (err) { alert(String(err)); }
+              }}
+            />
+            <span>Split modern menu into <strong>Offspring Presets</strong> + <strong>Offspring Tools</strong> top-level entries</span>
+          </label>
+          <p class="muted tiny warn-line">
+            ⚠ Options above may briefly restart Windows Explorer
+            (Opened File Explorer windows close).
+          </p>
         </div>
       </div>
 
@@ -1510,10 +1543,14 @@
       </div>
 
       <div class="card">
-        <h3>Data folder</h3>
-        <p class="muted tiny">Presets and settings live under <code>%APPDATA%\Offspring</code>.</p>
+        <h3>Data folders</h3>
+        <p class="muted tiny">
+          Presets & settings: <code>%APPDATA%\Offspring</code>.
+          Logs: <code>%LOCALAPPDATA%\Offspring\debug.log</code>
+        </p>
         <div class="row" style="margin-top: 12px;">
-          <button onclick={api.openDataFolder}>Open folder</button>
+          <button onclick={api.openDataFolder}>Open data folder</button>
+          <button onclick={api.openLogFolder} title="Opens %LOCALAPPDATA%\Offspring with debug.log selected">Open log folder</button>
           <button onclick={api.syncIntegrations}>Re-sync right-click menus</button>
         </div>
       </div>
@@ -1618,6 +1655,20 @@
   }
   .brand { display: flex; flex-direction: column; gap: 0; }
   .brand h1 { font-size: var(--fs-20); line-height: 1.1; }
+  /* Inline "Second March" credit. Reads as plain text — only the cursor
+     and hover-fade hint that it's interactive. We use a <span role="link">
+     rather than <a href> or <button> because both of those drag UA chrome
+     (anchor underline+colour, button background+border) that the user
+     specifically didn't want. The span has zero defaults to fight. */
+  .brand-link {
+    cursor: pointer;
+    transition: opacity 0.15s ease;
+    /* Outline only on keyboard focus so mouse users see no chrome. */
+    outline: none;
+  }
+  .brand-link:hover,
+  .brand-link:focus-visible { opacity: 0.6; }
+  .brand-link:focus-visible { outline: 1px dotted currentColor; outline-offset: 2px; }
   .tabs {
     display: flex;
     gap: 2px;
@@ -2087,4 +2138,12 @@
     100% { transform: translateX(250%); }
   }
   .dl-box .err { color: var(--c-danger); }
+  /* Red-orange caution stripe used next to toggles whose change
+     triggers an Explorer restart. Slightly stronger than `.muted`
+     so the user actually reads it before clicking. */
+  .warn-line {
+    color: #d97706;
+    margin-top: 6px;
+    font-weight: 500;
+  }
 </style>

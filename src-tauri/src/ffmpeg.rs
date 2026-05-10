@@ -270,6 +270,13 @@ fn scale_expr(preset: &Preset) -> Option<String> {
 
 fn build_filter_chain(preset: &Preset) -> String {
     let mut parts: Vec<String> = Vec::new();
+    // Free-form crop rectangle from the Crop tool runs FIRST so every
+    // subsequent filter (fps, scale, grayscale, etc.) sees only the
+    // cropped region. This matches the user's mental model: "crop is
+    // what I drew on the preview, then everything else."
+    if let Some((x, y, w, h)) = preset.crop_rect {
+        parts.push(format!("crop={w}:{h}:{x}:{y}"));
+    }
     if let Some(fps) = preset.fps {
         parts.push(format!("fps={fps}"));
     }
@@ -294,6 +301,21 @@ fn build_filter_chain(preset: &Preset) -> String {
     }
     if preset.timecode.unwrap_or(false) {
         parts.push(timecode_filter());
+    }
+    // Modify-tool transforms run AFTER cropping / scaling / overlay
+    // so the user's mental model ("flip the result") matches the
+    // pixel reality. Order: hflip → vflip → reverse.
+    if preset.modify_flip_h.unwrap_or(false) {
+        parts.push("hflip".to_string());
+    }
+    if preset.modify_flip_v.unwrap_or(false) {
+        parts.push("vflip".to_string());
+    }
+    if preset.modify_reverse.unwrap_or(false) {
+        // `reverse` buffers every frame before writing — fine for
+        // short clips, painful for long ones. Accept the limit; the
+        // dialog warns users.
+        parts.push("reverse".to_string());
     }
     parts.join(",")
 }
@@ -755,7 +777,25 @@ pub fn encode_file(
             } else {
                 cmd.args(["-crf", &crf.to_string()]);
             }
-            cmd.args(["-c:a", "aac", "-b:a", &abr]);
+            // Modify tool's "Remove audio" wins over every other
+            // audio path: we ask ffmpeg to drop the stream entirely
+            // with `-an`, which short-circuits the AAC re-encode and
+            // any audio filters (areverse) we'd otherwise add. Cheaper
+            // than encoding silence and gives a smaller output file.
+            if preset.modify_remove_audio.unwrap_or(false) {
+                cmd.arg("-an");
+            } else {
+                cmd.args(["-c:a", "aac", "-b:a", &abr]);
+                // Modify-tool reverse: also reverse the audio so the
+                // backwards video has backwards sound. Applied as a
+                // separate -af filter chain on the audio stream because
+                // build_filter_chain only constructs video (-vf) filters.
+                // No-op when there's no audio stream — ffmpeg silently
+                // skips audio filters in that case.
+                if preset.modify_reverse.unwrap_or(false) {
+                    cmd.args(["-af", "areverse"]);
+                }
+            }
             // `-pix_fmt yuv420p` is load-bearing for Windows Explorer's
             // thumbnail service — RGB24/RGBA sources (PNG sequences, EXR
             // renders) otherwise encode as yuv444p, which the shell
@@ -1411,6 +1451,12 @@ pub fn derive_merge_preset(ffmpeg: &Path, first: &Path) -> Preset {
         timecode: None,
         guides: None,
         overlay: None,
+        crop_rect: None,
+        modify_flip_h: None,
+        modify_flip_v: None,
+        modify_reverse: None,
+        modify_overwrite: None,
+        modify_remove_audio: None,
         icon: None,
         order: 0,
     }
@@ -1479,6 +1525,12 @@ pub fn derive_grayscale_preset(ffmpeg: &Path, input: &Path) -> Preset {
             timecode: None,
             guides: None,
             overlay: None,
+            crop_rect: None,
+            modify_flip_h: None,
+            modify_flip_v: None,
+            modify_reverse: None,
+            modify_overwrite: None,
+            modify_remove_audio: None,
             icon: None,
             order: 0,
         };
@@ -1513,6 +1565,12 @@ pub fn derive_grayscale_preset(ffmpeg: &Path, input: &Path) -> Preset {
         timecode: None,
         guides: None,
         overlay: None,
+        crop_rect: None,
+        modify_flip_h: None,
+        modify_flip_v: None,
+        modify_reverse: None,
+        modify_overwrite: None,
+        modify_remove_audio: None,
         icon: None,
         order: 0,
     }
@@ -1568,6 +1626,12 @@ pub fn derive_overlay_preset(ffmpeg: &Path, input: &Path, cfg: OverlayConfig) ->
             timecode: None,
             guides: None,
             overlay: Some(cfg),
+            crop_rect: None,
+            modify_flip_h: None,
+            modify_flip_v: None,
+            modify_reverse: None,
+            modify_overwrite: None,
+            modify_remove_audio: None,
             icon: None,
             order: 0,
         };
@@ -1602,6 +1666,12 @@ pub fn derive_overlay_preset(ffmpeg: &Path, input: &Path, cfg: OverlayConfig) ->
         timecode: None,
         guides: None,
         overlay: Some(cfg),
+        crop_rect: None,
+        modify_flip_h: None,
+        modify_flip_v: None,
+        modify_reverse: None,
+        modify_overwrite: None,
+        modify_remove_audio: None,
         icon: None,
         order: 0,
     }
@@ -2642,6 +2712,343 @@ pub fn encode_make_square_files(
     }
 
     Ok(())
+}
+
+/// Probe just the (width, height) of the first video stream / image
+/// stream of `input`. Used by the Crop dialog to do display↔source
+/// pixel coordinate mapping. Returns `None` only when ffprobe
+/// genuinely can't read the file — caller should treat that as an
+/// "unsupported file" error.
+pub fn probe_dimensions(ffmpeg: &Path, input: &Path) -> Option<(u32, u32)> {
+    let p = probe_video(ffmpeg, input);
+    match (p.width, p.height) {
+        (Some(w), Some(h)) => Some((w, h)),
+        _ => None,
+    }
+}
+
+/// Extract one preview frame at `time_seconds` into `out_path` as a
+/// JPEG. Used by the Crop dialog as a fallback when WebView2 can't
+/// decode the source format natively (ProRes / DNxHD / weird MKVs).
+/// Quality is medium-ish — preview frames don't need to be
+/// pristine, and a smaller file means it loads instantly.
+pub fn extract_preview_frame(
+    ffmpeg: &Path,
+    input: &Path,
+    time_seconds: f64,
+    out_path: &Path,
+) -> Result<()> {
+    let mut cmd = Command::new(ffmpeg);
+    // -ss BEFORE -i = fast keyframe seek (input-side). For preview
+    // frames we trade a few ms of seek inaccuracy for ~10x speed.
+    cmd.args(["-v", "error", "-y"])
+        .args(["-ss", &format!("{time_seconds}")])
+        .arg("-i")
+        .arg(input)
+        .args(["-frames:v", "1"])
+        .args(["-q:v", "5"])
+        .arg(out_path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    hide_console(&mut cmd);
+    let status = cmd.status().context("spawning ffmpeg for preview frame")?;
+    if !status.success() {
+        bail!("ffmpeg preview-frame extraction failed");
+    }
+    Ok(())
+}
+
+/// Bundle of transform options the Modify dialog can request. Any
+/// combination is valid as long as at least one transform is
+/// active — `commands::encode_modify` enforces that up front.
+#[derive(Debug, Clone)]
+pub struct ModifySpec {
+    /// Crop rect in source pixels (x, y, w, h). `None` means no
+    /// crop — only the other transforms run.
+    pub crop_rect: Option<(u32, u32, u32, u32)>,
+    pub flip_h: bool,
+    pub flip_v: bool,
+    pub reverse: bool,
+    /// Drop the audio stream entirely. Forwarded into the derived
+    /// preset and consumed by the MP4 encode branch (`-an` instead
+    /// of the AAC re-encode + any `-af` audio filters).
+    pub remove_audio: bool,
+    /// Replace the source file with the encoded output. Implemented
+    /// as encode-to-temp + atomic rename so a failure leaves the
+    /// source untouched.
+    pub overwrite: bool,
+}
+
+/// Modify tool: per-file rectangular crop + optional flip / reverse
+/// / overwrite. Routes through `encode_file` with a derived preset
+/// that carries the transform flags via `#[serde(skip)]` Preset
+/// fields. The actual filter chain is assembled in
+/// `build_filter_chain`.
+///
+/// For overwrite, we encode to a temp file alongside the source,
+/// then atomically rename over the source. A mid-encode failure
+/// leaves the temp file behind for manual recovery and the source
+/// untouched.
+pub fn encode_modify_files(
+    ffmpeg: &Path,
+    files: &[PathBuf],
+    spec: ModifySpec,
+    settings: &Settings,
+    mut on_progress: impl FnMut(ProgressEvent),
+) -> Result<()> {
+    if files.is_empty() {
+        bail!("Modify needs at least one file");
+    }
+    let total = files.len();
+
+    for (idx, input) in files.iter().enumerate() {
+        let file_index = idx + 1;
+        let input_display = input.display().to_string();
+
+        // Clamp the crop rect into THIS input's bounds. The dialog
+        // built the rect against the FIRST file's dimensions; if a
+        // later file is smaller we'd otherwise emit a filter that
+        // reads pixels outside the frame and ffmpeg would error.
+        let clamped_rect = spec.crop_rect.map(|(rx, ry, rw, rh)| {
+            let (src_w, src_h) = probe_dimensions(ffmpeg, input).unwrap_or((rx + rw, ry + rh));
+            let cx = rx.min(src_w.saturating_sub(1));
+            let cy = ry.min(src_h.saturating_sub(1));
+            let cw = rw.min(src_w.saturating_sub(cx)).max(1);
+            let ch = rh.min(src_h.saturating_sub(cy)).max(1);
+            (cx, cy, cw, ch)
+        });
+
+        let preset = derive_modify_preset(
+            ffmpeg,
+            input,
+            clamped_rect,
+            spec.flip_h,
+            spec.flip_v,
+            spec.reverse,
+            spec.remove_audio,
+        );
+
+        let mut bits: Vec<String> = Vec::new();
+        if let Some((x, y, w, h)) = clamped_rect {
+            bits.push(format!("crop {w}x{h} at ({x}, {y})"));
+        }
+        if spec.flip_h { bits.push("flip-h".into()); }
+        if spec.flip_v { bits.push("flip-v".into()); }
+        if spec.reverse { bits.push("reverse".into()); }
+        if spec.remove_audio { bits.push("remove-audio".into()); }
+        let summary = if bits.is_empty() { "encoding".into() } else { bits.join(" + ") };
+
+        on_progress(ProgressEvent {
+            file_index,
+            total_files: total,
+            input: input_display.clone(),
+            stage: "encode".into(),
+            percent: None,
+            message: Some(format!("Modify: {summary}")),
+        });
+
+        let encode_input = EncodeInput::File(input.clone());
+        let duration = encode_input.duration_hint(ffmpeg);
+
+        // Build the output preset's expected destination. encode_file
+        // calls `output_path(input, preset)` internally; we need to
+        // know what that landed at when we want to rename it over the
+        // source. For overwrite we rewrite the suffix to a unique temp
+        // marker and rename in this function after encode.
+        let final_path = if spec.overwrite {
+            input.clone()
+        } else {
+            output_path(&encode_input, &preset)
+        };
+
+        // Override the preset suffix with a unique temp tag when
+        // overwriting so encode_file writes alongside the source
+        // without clobbering it. We rename onto the source path
+        // after encode succeeds.
+        let mut preset_for_encode = preset.clone();
+        let tmp_path: Option<PathBuf> = if spec.overwrite {
+            let nonce = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0);
+            preset_for_encode.suffix = format!("._modify_tmp_{nonce}");
+            Some(output_path(&encode_input, &preset_for_encode))
+        } else {
+            None
+        };
+
+        let result = encode_file(
+            ffmpeg,
+            &encode_input,
+            &preset_for_encode,
+            settings,
+            duration,
+            file_index,
+            total,
+            |ev| on_progress(ev),
+        );
+        if let Err(e) = result {
+            // Clean up the half-written temp on overwrite failure so
+            // the source folder doesn't fill up with .modify_tmp_*
+            // files over time.
+            if let Some(ref tmp) = tmp_path {
+                let _ = std::fs::remove_file(tmp);
+            }
+            on_progress(ProgressEvent {
+                file_index,
+                total_files: total,
+                input: input_display,
+                stage: "error".into(),
+                percent: None,
+                message: Some(e.to_string()),
+            });
+            continue;
+        }
+
+        // Overwrite path: rename the temp over the source. Rust's
+        // `fs::rename` on Windows uses MoveFileExW with
+        // REPLACE_EXISTING semantics, so this is atomic from any
+        // observer's perspective: the source either still has its
+        // old bytes, or has the new ones, never an empty/partial
+        // state.
+        if let Some(tmp) = tmp_path {
+            if let Err(e) = std::fs::rename(&tmp, &final_path) {
+                let _ = std::fs::remove_file(&tmp);
+                on_progress(ProgressEvent {
+                    file_index,
+                    total_files: total,
+                    input: input_display.clone(),
+                    stage: "error".into(),
+                    percent: None,
+                    message: Some(format!(
+                        "Encode succeeded but overwrite failed: {e}. The original file is unchanged.",
+                    )),
+                });
+                continue;
+            }
+            on_progress(ProgressEvent {
+                file_index,
+                total_files: total,
+                input: input_display,
+                stage: "done".into(),
+                percent: Some(1.0),
+                message: Some(format!("{} (overwritten)", final_path.display())),
+            });
+        }
+    }
+
+    Ok(())
+}
+
+/// Build a per-file preset for the Modify tool. Format mirrors the
+/// input (gif → gif, mp4-ish → mp4, image → image of matching
+/// codec). The transforms ride along on Preset's skip-serialized
+/// fields (`crop_rect`, `modify_flip_h`, `modify_flip_v`,
+/// `modify_reverse`, `modify_remove_audio`) that `build_filter_chain`
+/// and the encode dispatcher read.
+pub fn derive_modify_preset(
+    ffmpeg: &Path,
+    input: &Path,
+    crop_rect: Option<(u32, u32, u32, u32)>,
+    flip_h: bool,
+    flip_v: bool,
+    reverse: bool,
+    remove_audio: bool,
+) -> Preset {
+    use crate::presets::{Dither, Format, ImageCodec};
+
+    let ext = input
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("mp4")
+        .to_ascii_lowercase();
+
+    if is_image_path(input) {
+        let codec = image_codec_from_ext(input);
+        return Preset {
+            id: "__modify__".into(),
+            name: "Modify".into(),
+            enabled: true,
+            format: Format::Image,
+            suffix: "_modified".into(),
+            width: None,
+            height: None,
+            fps: None,
+            crop: None,
+            palette_colors: None,
+            dither: None,
+            bayer_scale: None,
+            crf: None,
+            preset_speed: None,
+            video_bitrate: None,
+            audio_bitrate: None,
+            use_cuda: None,
+            target_max_mb: None,
+            image_codec: Some(codec.clone()),
+            image_quality: Some(codec.default_quality()),
+            strip_metadata: Some(false),
+            grayscale: None,
+            timecode: None,
+            guides: None,
+            overlay: None,
+            crop_rect: crop_rect,
+            modify_flip_h: Some(flip_h),
+            modify_flip_v: Some(flip_v),
+            modify_reverse: Some(reverse),
+            modify_overwrite: None,
+            // Images have no audio track, but we plumb the flag
+            // through anyway so the field stays a single source of
+            // truth no matter what branch ran.
+            modify_remove_audio: Some(remove_audio),
+            icon: None,
+            order: 0,
+        };
+    }
+
+    let format = if ext == "gif" { Format::Gif } else { Format::Mp4 };
+    let probe = probe_video(ffmpeg, input);
+    Preset {
+        id: "__modify__".into(),
+        name: "Modify".into(),
+        enabled: true,
+        format,
+        suffix: "_modified".into(),
+        // Don't pre-resize — the user expects the crop dimensions
+        // to be the output dimensions exactly. Width/height left
+        // None means the chain doesn't insert a `scale=...` after
+        // the `crop=...`.
+        width: None,
+        height: None,
+        fps: probe.fps,
+        crop: None,
+        palette_colors: Some(128),
+        dither: Some(Dither::Bayer),
+        bayer_scale: Some(3),
+        // Visually-lossless baseline — Crop is "preserve everything,
+        // just remove pixels outside the rect".
+        crf: Some(18),
+        preset_speed: Some("medium".into()),
+        video_bitrate: None,
+        audio_bitrate: Some("192k".into()),
+        use_cuda: Some(false),
+        target_max_mb: None,
+        image_codec: None,
+        image_quality: None,
+        strip_metadata: None,
+        grayscale: None,
+        timecode: None,
+        guides: None,
+        overlay: None,
+        crop_rect: crop_rect,
+        modify_flip_h: Some(flip_h),
+        modify_flip_v: Some(flip_v),
+        modify_reverse: Some(reverse),
+        modify_overwrite: None,
+        modify_remove_audio: Some(remove_audio),
+        icon: None,
+        order: 0,
+    }
 }
 
 /// Image-only Compare: stack N stills horizontally into one still.

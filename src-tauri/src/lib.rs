@@ -158,6 +158,8 @@ pub fn run() {
             commands::sync_integrations,
             commands::restart_explorer,
             commands::open_data_folder,
+            commands::open_log_folder,
+            commands::open_external_url,
             commands::encode,
             commands::encode_merge,
             commands::encode_grayscale,
@@ -166,6 +168,10 @@ pub fn run() {
             commands::encode_trim,
             commands::encode_invert,
             commands::encode_make_square,
+            commands::encode_modify,
+            commands::prepare_modify_encode,
+            commands::probe_dimensions,
+            commands::extract_preview_frame,
             commands::get_pending_files,
             commands::get_pending_preset_id,
             commands::get_pending_custom_preset,
@@ -176,6 +182,7 @@ pub fn run() {
             commands::get_pending_trim_dialog,
             commands::get_pending_invert,
             commands::get_pending_make_square,
+            commands::get_pending_modify_dialog,
             commands::prepare_custom_encode,
             commands::prepare_trim_encode,
             updates::check_for_updates,
@@ -257,6 +264,7 @@ pub fn run() {
                                 *state.trim_dialog.lock().unwrap() = false;
                                 *state.invert.lock().unwrap() = false;
                                 *state.make_square.lock().unwrap() = false;
+                                *state.modify_dialog.lock().unwrap() = false;
                             }
                             // Critical: zero `last_dispatch` so the very next
                             // arrival in this same batch (typically tens of
@@ -414,6 +422,16 @@ fn merge_pending(handle: &tauri::AppHandle, cmd: Option<Command>) {
             append_files(&state, files);
             *state.make_square.lock().unwrap() = true;
         }
+        Command::Modify { files } => {
+            dlog!("merge_pending: Modify +files={}", files.len());
+            append_files(&state, files);
+            *state.modify_dialog.lock().unwrap() = true;
+            // Modify routes to its own mini window — `open_window_for_pending`
+            // detects this via the `modify_dialog` flag. The window reads
+            // pending files, the user picks transforms (crop / flips /
+            // reverse / overwrite), then the window navigates to /progress/
+            // in-place to run encode_modify.
+        }
         Command::Trim { files } => {
             dlog!("merge_pending: Trim +files={}", files.len());
             append_files(&state, files);
@@ -464,6 +482,7 @@ fn open_window_for_pending(handle: &tauri::AppHandle) {
     let trim_dialog = *state.trim_dialog.lock().unwrap();
     let invert = *state.invert.lock().unwrap();
     let make_square = *state.make_square.lock().unwrap();
+    let modify_dialog = *state.modify_dialog.lock().unwrap();
     let preset_id = state.preset_id.lock().unwrap().clone();
 
     dlog!(
@@ -490,6 +509,15 @@ fn open_window_for_pending(handle: &tauri::AppHandle) {
     // dialog. Checked before Custom because trim_dialog is the more
     // specific signal — Custom is the fallback for "files but no
     // tool flag at all".
+    if modify_dialog {
+        dlog!("  → open_modify_window");
+        match commands::open_modify_window(handle, files) {
+            Ok(_) => dlog!("  open_modify_window OK"),
+            Err(e) => dlog!("  open_modify_window FAILED: {:#}", e),
+        }
+        return;
+    }
+
     if trim_dialog {
         dlog!("  → open_trim_window");
         match commands::open_trim_window(handle, files) {
@@ -502,6 +530,8 @@ fn open_window_for_pending(handle: &tauri::AppHandle) {
     // Custom: files present but no preset_id and no tool flag → user
     // invoked `offspring custom <files>` and wants the tweak dialog.
     if preset_id.is_none() && !merge && !compare && !grayscale && !overlay && !invert && !make_square {
+        // (modify_dialog and trim_dialog already handled above; if
+        // either was set we returned earlier.)
         dlog!("  → open_custom_window");
         match commands::open_custom_window(handle, files) {
             Ok(_) => dlog!("  open_custom_window OK"),

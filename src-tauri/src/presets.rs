@@ -174,6 +174,40 @@ pub struct Preset {
     #[serde(skip)]
     pub overlay: Option<OverlayConfig>,
 
+    /// Free-form crop rectangle in source pixels: (x, y, w, h).
+    /// Populated only by the Modify tool via `derive_modify_preset`.
+    /// `#[serde(skip)]` because no user preset ever stores one — the
+    /// rect comes from the Modify dialog and lives only for the
+    /// duration of an encode invocation.
+    #[serde(skip)]
+    pub crop_rect: Option<(u32, u32, u32, u32)>,
+    /// Append `hflip` to the filter chain. Populated only by the
+    /// Modify dialog. Skip-serialize for the same reason as crop_rect.
+    #[serde(skip)]
+    pub modify_flip_h: Option<bool>,
+    /// Append `vflip` to the filter chain. Modify-dialog only.
+    #[serde(skip)]
+    pub modify_flip_v: Option<bool>,
+    /// Append `reverse` to the video filter chain (and `areverse` to
+    /// the audio side when the input has audio). Memory-hungry on
+    /// long videos because ffmpeg buffers every frame; we let it run
+    /// regardless and surface "this is taking a while" via the
+    /// regular progress events. Modify-dialog only.
+    #[serde(skip)]
+    pub modify_reverse: Option<bool>,
+    /// Replace the source file with the encoded output instead of
+    /// writing alongside it. Implemented as encode-to-temp then
+    /// atomic rename so a partial failure never corrupts the source.
+    /// Modify-dialog only.
+    #[serde(skip)]
+    pub modify_overwrite: Option<bool>,
+    /// Drop the audio track from the output (`-an` in the MP4 branch,
+    /// no-op for GIF/image which already have no audio). Modify-
+    /// dialog only — surfaced as a "Remove audio" checkbox in the UI
+    /// and hidden for image inputs.
+    #[serde(skip)]
+    pub modify_remove_audio: Option<bool>,
+
     // icon (absolute path or empty to use default)
     #[serde(default)]
     pub icon: Option<String>,
@@ -274,6 +308,32 @@ pub struct Settings {
     /// default because enabling it prompts the user for cert trust.
     #[serde(default)]
     pub modern_menu_enabled: Option<bool>,
+    /// When `true`, the modern menu shows TWO top-level entries
+    /// ("Offspring Presets" + "Offspring Tools") instead of the
+    /// default single "Offspring" entry that flat-lists everything.
+    /// Mirrors what the classic-menu layout does (and uses the same
+    /// labels). The shell-ext DLL reads this directly out of
+    /// settings.json; flipping the toggle takes effect on the next
+    /// flyout open without restarting Explorer. Off by default — the
+    /// flat single-entry layout is what most users expect.
+    #[serde(default)]
+    pub modern_menu_split_layout: Option<bool>,
+    /// Color-management toggle. Off by default — keeps the existing
+    /// "trust ffmpeg's defaults" behaviour, which is fine for sRGB
+    /// sources going to sRGB-rendering targets (the 99% case). When
+    /// on:
+    ///   * MP4 outputs probe the input's color tags (BT.709 / BT.601
+    ///     / etc.) and pass them through via `-colorspace` etc., so
+    ///     downstream players don't have to guess.
+    ///   * HDR inputs (PQ / HLG) are auto tone-mapped to BT.709 SDR
+    ///     via the `zscale` filter. Requires libzimg in the ffmpeg
+    ///     build — the bundled gyan.dev "essentials" build includes
+    ///     it; user-supplied minimal builds may not.
+    ///   * Image outputs preserve embedded ICC profiles (overrides
+    ///     `strip_metadata` for image presets — you can't keep ICC
+    ///     while wiping metadata).
+    #[serde(default)]
+    pub color_management: Option<bool>,
     /// Extension tools (auto-detect sequences, merge multi-select, …).
     /// See `ToolsSettings` for the per-tool knobs. Absent / partial JSON
     /// falls back to `ToolsSettings::default()` so old settings files
@@ -304,6 +364,8 @@ pub struct ToolsSettings {
     pub invert: InvertTool,
     #[serde(default = "MakeSquareTool::default")]
     pub make_square: MakeSquareTool,
+    #[serde(default = "ModifyTool::default")]
+    pub modify: ModifyTool,
 }
 
 impl Default for ToolsSettings {
@@ -317,6 +379,7 @@ impl Default for ToolsSettings {
             trim: TrimTool::default(),
             invert: InvertTool::default(),
             make_square: MakeSquareTool::default(),
+            modify: ModifyTool::default(),
         }
     }
 }
@@ -411,6 +474,27 @@ pub struct TrimTool {
 }
 
 impl Default for TrimTool {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
+}
+
+/// "Modify..." multi-purpose dialog. Opens a mini window with a
+/// preview of the selected file (scrubbable for native-codec videos,
+/// single-frame fallback for exotic codecs, direct display for
+/// images) and lets the user drag a crop rectangle, toggle flips,
+/// reverse video, and optionally overwrite the source.
+///
+/// Same set of transforms is applied to every selected file. Output
+/// keeps the source format and codec; the difference from the base
+/// encode pipeline is only the filter chain (crop / hflip / vflip /
+/// reverse / areverse).
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct ModifyTool {
+    pub enabled: bool,
+}
+
+impl Default for ModifyTool {
     fn default() -> Self {
         Self { enabled: true }
     }

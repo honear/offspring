@@ -10,8 +10,8 @@
 ; Compile with the Inno Setup compiler (iscc.exe or the Inno Setup IDE).
 
 #define AppName      "Offspring"
-#define AppVersion   "0.3.47"
-#define AppVersionMsix "0.3.47.0"
+#define AppVersion   "0.4.1"
+#define AppVersionMsix "0.4.1.0"
 #define AppPublisher "Second March"
 #define AppExeName   "offspring.exe"
 #define AppId        "{{D8E5C6BC-5F10-4B29-A8A9-7D4D1A3B9C22}"
@@ -67,12 +67,23 @@ Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription:
 Source: "{#BinDir}\{#AppExeName}"; DestDir: "{app}"; Flags: ignoreversion
 Source: "scripts\download_ffmpeg.ps1"; DestDir: "{app}\scripts"; Flags: ignoreversion
 Source: "scripts\trust_cert.ps1"; DestDir: "{app}\scripts"; Flags: ignoreversion
-; Shell-ext DLL + signed sparse MSIX + public cert, consumed by the
-; modern-menu Settings toggle (Add-AppxPackage runs against them from
-; the app at toggle-on time). The CI workflow copies the DLL from
+; Shell-ext DLL + three signed sparse MSIX packages + public cert,
+; consumed by the modern-menu Settings toggle (Add-AppxPackage runs
+; against them from the app). The CI workflow copies the DLL from
 ; shell-ext/target/release/ into {#BinDir} before iscc runs.
+;
+; Three MSIX packages share one DLL on disk:
+;   * OffspringShellExt.msix         — "Offspring" (unified mode)
+;   * OffspringShellExt.Presets.msix — "Offspring Presets" (split mode)
+;   * OffspringShellExt.Tools.msix   — "Offspring Tools" (split mode)
+; Each has a distinct package identity so Win11 doesn't auto-group
+; them under one parent. The app dynamically registers either
+; {Unified} or {Presets, Tools} based on the user's split-layout
+; toggle.
 Source: "{#BinDir}\offspring_shell_ext.dll"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 Source: "msix\dist\OffspringShellExt.msix"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
+Source: "msix\dist\OffspringShellExt.Presets.msix"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
+Source: "msix\dist\OffspringShellExt.Tools.msix"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 Source: "msix\dist\OffspringShellExt.cer"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 
 [Icons]
@@ -142,6 +153,49 @@ Filename: "powershell.exe"; \
 ; Users can delete manually if they want to wipe presets / FFmpeg.
 
 [Code]
+// Win32 APIs imported from user32.dll. We use these to force the wizard
+// window to the foreground after it's created — by default Inno's setup
+// window can come up BEHIND whatever was last active, because Windows'
+// foreground-lock rules don't always grant the new process focus
+// (especially after a UAC elevation handoff). Calling SetForegroundWindow
+// + a SW_SHOW reassertion at the right moment side-steps that.
+function SetForegroundWindow(hWnd: Longword): Boolean;
+  external 'SetForegroundWindow@user32.dll stdcall';
+function ShowWindow(hWnd: Longword; nCmdShow: Integer): Boolean;
+  external 'ShowWindow@user32.dll stdcall';
+function BringWindowToTop(hWnd: Longword): Boolean;
+  external 'BringWindowToTop@user32.dll stdcall';
+function SwitchToThisWindow(hWnd: Longword; fAltTab: Boolean): Boolean;
+  external 'SwitchToThisWindow@user32.dll stdcall';
+// SW_SHOW is pre-declared by Inno's Pascal scripting library, but
+// SW_RESTORE isn't — declare the missing one ourselves. Re-declaring
+// SW_SHOW would throw "Duplicate identifier".
+const
+  SW_RESTORE = 9;
+
+// Inno fires InitializeWizard right after WizardForm is constructed but
+// before the first page is rendered. That's the cleanest place to nail
+// the foreground state — we want the user to see the wizard on top the
+// moment it appears.
+//
+// We belt-and-suspender three Win32 calls because SetForegroundWindow
+// alone can be silently no-op'd by Windows when the process doesn't
+// hold the foreground "right" (it returns FALSE but doesn't error). The
+// combo of ShowWindow(SW_RESTORE/SW_SHOW) + BringWindowToTop +
+// SwitchToThisWindow is the standard installer-side workaround used by
+// e.g. Inno Setup community templates.
+procedure InitializeWizard;
+var
+  H: Longword;
+begin
+  H := WizardForm.Handle;
+  ShowWindow(H, SW_RESTORE);
+  ShowWindow(H, SW_SHOW);
+  BringWindowToTop(H);
+  SetForegroundWindow(H);
+  SwitchToThisWindow(H, True);
+end;
+
 // ShouldLaunchAfter returns True iff the installer was invoked with the
 // custom /LAUNCHAFTER switch. The in-app updater passes this when it wants
 // the freshly-installed binary to relaunch itself on completion. A plain

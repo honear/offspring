@@ -46,7 +46,7 @@ pub fn sync_all(presets: &[Preset], settings: &Settings) -> Result<()> {
     // only installed when modern is off.
     if settings.modern_menu_enabled.unwrap_or(false) {
         context_menu::cleanup()?;
-        modern_menu::sync(presets)?;
+        modern_menu::sync(presets, settings)?;
     } else {
         modern_menu::cleanup()?;
         context_menu::sync(presets, settings)?;
