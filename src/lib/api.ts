@@ -100,6 +100,7 @@ export const encodeModify = (
   flipV: boolean,
   reverse: boolean,
   removeAudio: boolean,
+  rotate: number,
   overwrite: boolean,
 ) =>
   invoke<void>("encode_modify", {
@@ -112,6 +113,7 @@ export const encodeModify = (
     flipV,
     reverse,
     removeAudio,
+    rotate,
     overwrite,
   });
 

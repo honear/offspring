@@ -872,6 +872,7 @@ pub fn encode_modify(
     flip_v: bool,
     reverse: bool,
     remove_audio: bool,
+    rotate: u32,
     overwrite: bool,
 ) -> Result<(), String> {
     if files.is_empty() {
@@ -882,14 +883,21 @@ pub fn encode_modify(
     } else {
         None
     };
+    // Normalise rotate to one of 0/90/180/270 so the filter chain
+    // never has to defend against bogus values from the frontend.
+    let rotate = match rotate {
+        90 | 180 | 270 => rotate,
+        _ => 0,
+    };
+    let rotated = rotate != 0;
     // At least one transform must be active or we'd be doing a
-    // pointless re-encode of the source. "Remove audio" counts —
-    // stripping the audio track is a meaningful change even if the
-    // video bytes pass through unchanged. Frontend disables the
-    // button in this case but defense-in-depth.
-    if crop_rect.is_none() && !flip_h && !flip_v && !reverse && !remove_audio {
+    // pointless re-encode of the source. "Remove audio" and any
+    // non-zero rotation each count on their own — both are
+    // meaningful changes the user explicitly asked for. Frontend
+    // disables the button in this case but defense-in-depth.
+    if crop_rect.is_none() && !flip_h && !flip_v && !reverse && !remove_audio && !rotated {
         return Err(
-            "Nothing to modify — pick at least one transform (crop / flip / reverse / remove audio).".into(),
+            "Nothing to modify — pick at least one transform (crop / rotate / flip / reverse / remove audio).".into(),
         );
     }
     let settings = presets::load_settings().unwrap_or_default();
@@ -908,6 +916,7 @@ pub fn encode_modify(
                 flip_h,
                 flip_v,
                 reverse,
+                rotate,
                 remove_audio,
                 overwrite,
             },

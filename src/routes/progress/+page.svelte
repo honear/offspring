@@ -200,6 +200,11 @@
       // any-transform validity check on the backend, so the dialog
       // can dispatch it alone (no crop, no flip, no reverse).
       const modifyRemoveAudio = search.get("ra") === "1";
+      // Clockwise rotation in degrees: 0 / 90 / 180 / 270. Any other
+      // value is treated as 0 server-side; we mirror that here so
+      // the any-transform check doesn't get fooled by junk URLs.
+      const rotateRaw = parseInt(search.get("rot") ?? "0", 10) || 0;
+      const modifyRotate = (rotateRaw === 90 || rotateRaw === 180 || rotateRaw === 270) ? rotateRaw : 0;
       const modifyOverwrite = search.get("ow") === "1";
       // Optional middle-range cut. Both `from` and `to` must be present
       // for the cut to take effect; missing or partial → no cut.
@@ -314,7 +319,8 @@
           modifyFlipH ||
           modifyFlipV ||
           modifyReverse ||
-          modifyRemoveAudio;
+          modifyRemoveAudio ||
+          modifyRotate !== 0;
         if (!anyTransform) {
           errored = true;
           errorMsg = "Modify was started without any transforms. Open the Modify dialog and pick at least one.";
@@ -324,7 +330,7 @@
         await api.encodeModify(
           files,
           modifyCropX, modifyCropY, modifyCropW, modifyCropH,
-          modifyFlipH, modifyFlipV, modifyReverse, modifyRemoveAudio, modifyOverwrite,
+          modifyFlipH, modifyFlipV, modifyReverse, modifyRemoveAudio, modifyRotate, modifyOverwrite,
         );
       } else {
         await api.encode(files, preset!);

@@ -207,6 +207,14 @@ pub struct Preset {
     /// and hidden for image inputs.
     #[serde(skip)]
     pub modify_remove_audio: Option<bool>,
+    /// Clockwise rotation in degrees. Only 0 / 90 / 180 / 270 are
+    /// meaningful — anything else is ignored. Translates to one or
+    /// two `transpose=` filters appended AFTER crop/scale but BEFORE
+    /// flips/reverse, so flip toggles apply to the visually rotated
+    /// frame (matches the user's mental model of "flip what I see").
+    /// Modify-dialog only.
+    #[serde(skip)]
+    pub modify_rotate: Option<u32>,
 
     // icon (absolute path or empty to use default)
     #[serde(default)]

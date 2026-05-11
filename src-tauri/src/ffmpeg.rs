@@ -304,7 +304,23 @@ fn build_filter_chain(preset: &Preset) -> String {
     }
     // Modify-tool transforms run AFTER cropping / scaling / overlay
     // so the user's mental model ("flip the result") matches the
-    // pixel reality. Order: hflip → vflip → reverse.
+    // pixel reality. Order: rotate → hflip → vflip → reverse.
+    //
+    // Rotation goes BEFORE flips so a user who picks "90° CW + flip
+    // horizontal" sees the flip applied to the rotated frame, not the
+    // source orientation. `transpose=1` is 90° CW, `transpose=2` is
+    // 90° CCW (= 270° CW). 180° is two chained `transpose=1` calls,
+    // which is cheaper than the float-math `rotate=PI` filter and
+    // produces identical pixels.
+    match preset.modify_rotate.unwrap_or(0) {
+        90 => parts.push("transpose=1".to_string()),
+        180 => {
+            parts.push("transpose=1".to_string());
+            parts.push("transpose=1".to_string());
+        }
+        270 => parts.push("transpose=2".to_string()),
+        _ => {}
+    }
     if preset.modify_flip_h.unwrap_or(false) {
         parts.push("hflip".to_string());
     }
@@ -1457,6 +1473,7 @@ pub fn derive_merge_preset(ffmpeg: &Path, first: &Path) -> Preset {
         modify_reverse: None,
         modify_overwrite: None,
         modify_remove_audio: None,
+        modify_rotate: None,
         icon: None,
         order: 0,
     }
@@ -1531,6 +1548,7 @@ pub fn derive_grayscale_preset(ffmpeg: &Path, input: &Path) -> Preset {
             modify_reverse: None,
             modify_overwrite: None,
             modify_remove_audio: None,
+            modify_rotate: None,
             icon: None,
             order: 0,
         };
@@ -1571,6 +1589,7 @@ pub fn derive_grayscale_preset(ffmpeg: &Path, input: &Path) -> Preset {
         modify_reverse: None,
         modify_overwrite: None,
         modify_remove_audio: None,
+        modify_rotate: None,
         icon: None,
         order: 0,
     }
@@ -1632,6 +1651,7 @@ pub fn derive_overlay_preset(ffmpeg: &Path, input: &Path, cfg: OverlayConfig) ->
             modify_reverse: None,
             modify_overwrite: None,
             modify_remove_audio: None,
+            modify_rotate: None,
             icon: None,
             order: 0,
         };
@@ -1672,6 +1692,7 @@ pub fn derive_overlay_preset(ffmpeg: &Path, input: &Path, cfg: OverlayConfig) ->
         modify_reverse: None,
         modify_overwrite: None,
         modify_remove_audio: None,
+        modify_rotate: None,
         icon: None,
         order: 0,
     }
@@ -2770,6 +2791,9 @@ pub struct ModifySpec {
     pub flip_h: bool,
     pub flip_v: bool,
     pub reverse: bool,
+    /// Clockwise rotation in degrees. Only 0 / 90 / 180 / 270 are
+    /// honoured; anything else is treated as 0 by `build_filter_chain`.
+    pub rotate: u32,
     /// Drop the audio stream entirely. Forwarded into the derived
     /// preset and consumed by the MP4 encode branch (`-an` instead
     /// of the AAC re-encode + any `-af` audio filters).
@@ -2827,11 +2851,15 @@ pub fn encode_modify_files(
             spec.flip_v,
             spec.reverse,
             spec.remove_audio,
+            spec.rotate,
         );
 
         let mut bits: Vec<String> = Vec::new();
         if let Some((x, y, w, h)) = clamped_rect {
             bits.push(format!("crop {w}x{h} at ({x}, {y})"));
+        }
+        if spec.rotate == 90 || spec.rotate == 180 || spec.rotate == 270 {
+            bits.push(format!("rotate-{}", spec.rotate));
         }
         if spec.flip_h { bits.push("flip-h".into()); }
         if spec.flip_v { bits.push("flip-v".into()); }
@@ -2945,8 +2973,8 @@ pub fn encode_modify_files(
 /// input (gif → gif, mp4-ish → mp4, image → image of matching
 /// codec). The transforms ride along on Preset's skip-serialized
 /// fields (`crop_rect`, `modify_flip_h`, `modify_flip_v`,
-/// `modify_reverse`, `modify_remove_audio`) that `build_filter_chain`
-/// and the encode dispatcher read.
+/// `modify_reverse`, `modify_remove_audio`, `modify_rotate`) that
+/// `build_filter_chain` and the encode dispatcher read.
 pub fn derive_modify_preset(
     ffmpeg: &Path,
     input: &Path,
@@ -2955,6 +2983,7 @@ pub fn derive_modify_preset(
     flip_v: bool,
     reverse: bool,
     remove_audio: bool,
+    rotate: u32,
 ) -> Preset {
     use crate::presets::{Dither, Format, ImageCodec};
 
@@ -3001,6 +3030,7 @@ pub fn derive_modify_preset(
             // through anyway so the field stays a single source of
             // truth no matter what branch ran.
             modify_remove_audio: Some(remove_audio),
+            modify_rotate: Some(rotate),
             icon: None,
             order: 0,
         };
@@ -3046,6 +3076,7 @@ pub fn derive_modify_preset(
         modify_reverse: Some(reverse),
         modify_overwrite: None,
         modify_remove_audio: Some(remove_audio),
+        modify_rotate: Some(rotate),
         icon: None,
         order: 0,
     }

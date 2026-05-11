@@ -59,6 +59,10 @@
   // since they have no audio anyway, and counts as a "real" transform
   // for the validity check (so this can be applied alone).
   let removeAudio = $state(false);
+  // Clockwise rotation in degrees. 0 / 90 / 180 / 270 only — anything
+  // else gets normalised to 0 server-side. Counts as a real transform
+  // for the validity check.
+  let rotate = $state<0 | 90 | 180 | 270>(0);
   // Overwrite is the destructive option. Defaulting OFF + a visible
   // warning + the button text changing keeps it from being a footgun.
   let overwrite = $state(false);
@@ -377,7 +381,7 @@
     files.length > 0 &&
       srcW > 0 &&
       srcH > 0 &&
-      (cropActive || flipH || flipV || reverse || removeAudio),
+      (cropActive || flipH || flipV || reverse || removeAudio || rotate !== 0),
   );
 
   async function startModify() {
@@ -415,6 +419,7 @@
       fv: flipV ? "1" : "0",
       rev: reverse ? "1" : "0",
       ra: removeAudio ? "1" : "0",
+      rot: String(rotate),
       ow: overwrite ? "1" : "0",
     });
     await goto(`/progress/?${params.toString()}`);
@@ -557,6 +562,18 @@
   <!-- Transform toggles. Reverse is hidden for image inputs since
        there's nothing to reverse on a single frame. -->
   <div class="toggles">
+    <label class="toggle" title="Rotate the output clockwise. Rotation is applied AFTER cropping but BEFORE flips, so a flip-horizontal toggle applies to the rotated frame the way it looks on screen.">
+      <span class="select-label">Rotate</span>
+      <select
+        bind:value={rotate}
+        onchange={(e) => { rotate = parseInt((e.currentTarget as HTMLSelectElement).value, 10) as 0 | 90 | 180 | 270; }}
+      >
+        <option value={0}>None</option>
+        <option value={90}>90° CW</option>
+        <option value={180}>180°</option>
+        <option value={270}>270° CW</option>
+      </select>
+    </label>
     <label class="toggle">
       <input type="checkbox" bind:checked={flipH}>
       <span>Flip horizontal</span>
@@ -711,6 +728,21 @@
   }
   .toggle.danger {
     color: var(--c-error, #c83838);
+  }
+  /* "Rotate" dropdown lives inline with the toggle checkboxes. Reset
+     the native <select> chrome so it visually matches the row height
+     and the surrounding pill-style controls. */
+  .toggle .select-label {
+    font-weight: 500;
+  }
+  .toggle select {
+    font: inherit;
+    color: inherit;
+    background: var(--c-surface-2, transparent);
+    border: 1px solid var(--c-border, rgba(0, 0, 0, 0.15));
+    border-radius: 4px;
+    padding: 2px 6px;
+    cursor: pointer;
   }
   .bottom {
     display: flex;
