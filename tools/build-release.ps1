@@ -176,7 +176,7 @@ try {
 
     # The unversioned "latest" copy is what gets attached to GitHub
     # releases for the forever-link
-    #   https://github.com/honear/offspring/releases/latest/download/Offspring-Setup.exe
+    #   https://github.com/second-march/offspring/releases/latest/download/Offspring-Setup.exe
     # We only refresh it on -Release builds so local iteration builds
     # ("0.3.41-0007") don't masquerade as the published "latest" — the
     # marketing site link would otherwise serve a half-finished build.

@@ -21,7 +21,7 @@ agree on a different timeline.
 ## Supported versions
 
 Only the latest published release on
-[github.com/honear/offspring/releases](https://github.com/honear/offspring/releases)
+[github.com/second-march/offspring/releases](https://github.com/second-march/offspring/releases)
 receives security fixes. Local-iteration builds (versions ending in
 `-bNNNN`) are pre-release artifacts and are not supported.
 
@@ -61,18 +61,20 @@ in short:
 
 ## Privacy / network connections
 
-Offspring makes **no analytics, telemetry, or "phone-home" calls**. The
-only outbound network traffic the app ever generates is:
+Offspring makes **no analytics, telemetry, or "phone-home" calls**.
+It also makes **no automatic outbound requests at all** — every
+network call is explicitly user-initiated. The complete list:
 
 | When | Where | Why |
 |---|---|---|
-| On launch | `https://api.github.com/repos/honear/offspring/releases/latest` | Update check. Fire-and-forget; failures collapse to "no update available" with no UI. The request carries the running version in the `User-Agent` header for release-page traffic stats; no other identifying data. |
-| When the user clicks "Restart and install" on a pending update | GitHub-owned download host (one of `github.com`, `objects.githubusercontent.com`, `release-assets.githubusercontent.com`) | Downloads the installer .exe and its `.minisig` sidecar. Refuses to fetch from any other host. |
-| When the user clicks "Download FFmpeg" in Settings (or accepts the prompt on first install) | `https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip` and the matching `.sha256` sidecar | One-time FFmpeg fetch. After that, no further gyan.dev traffic. |
+| When the user clicks **Settings → Check for updates** | `https://api.github.com/repos/second-march/offspring/releases/latest` | Update check. Failures surface as "couldn't reach the update server" only on the manual path. The request carries the running version in the `User-Agent` header for release-page traffic stats; no other identifying data. |
+| When the user clicks **Download** in the update banner that follows a successful check | GitHub-owned download host (one of `github.com`, `objects.githubusercontent.com`, `release-assets.githubusercontent.com`) | Downloads the installer .exe and its `.minisig` sidecar. Refuses to fetch from any other host. |
+| When the user clicks **Download FFmpeg** in Settings (or accepts the prompt on first install) | `https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip` and the matching `.sha256` sidecar | One-time FFmpeg fetch. After that, no further gyan.dev traffic. |
 
-That's the complete list. No background pings, no crash reports, no
-usage stats, no third-party SDKs, no remote config, no A/B tests. The
-in-app debug log lives only on the user's machine
+That's the complete list. **No traffic at launch, no background
+pings, no scheduled checks**, no crash reports, no usage stats, no
+third-party SDKs, no remote config, no A/B tests. The in-app debug
+log lives only on the user's machine
 (`%LOCALAPPDATA%\Offspring\debug.log`) and is never uploaded.
 
 ## What we already do

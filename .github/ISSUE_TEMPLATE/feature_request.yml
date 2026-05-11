@@ -1,0 +1,55 @@
+name: Feature request
+description: Suggest a new preset, tool, or capability.
+title: "[Feature] "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Feature requests are welcome — please write a few lines about
+        the underlying problem before sketching a solution. That makes
+        it much easier to figure out whether your idea (or a simpler one)
+        is worth shipping.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What's the problem?
+      description: What are you trying to do that's awkward or impossible today?
+      placeholder: |
+        I shoot a lot of 4:5 portrait videos for Instagram and have to
+        re-export them through a paid tool every time…
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What would you like Offspring to do?
+      description: A rough sketch of the feature is fine. UI mock-ups welcome.
+      placeholder: |
+        A "4:5 portrait" preset under Presets, defaulting to 1080×1350,
+        H.264, 8 Mbps, with auto-pad to vertical letterbox.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: What have you tried so far?
+      description: Existing presets, external tools, FFmpeg incantations, etc.
+    validations:
+      required: false
+
+  - type: dropdown
+    id: scope
+    attributes:
+      label: Scope
+      description: How big is this in your head?
+      options:
+        - New preset (just a flag combination)
+        - New tool (right-click action that opens a dialog or runs in place)
+        - UI / UX tweak
+        - Other / not sure
+    validations:
+      required: false

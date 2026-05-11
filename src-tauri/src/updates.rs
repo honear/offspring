@@ -23,7 +23,7 @@ use tauri::{AppHandle, Emitter};
 use crate::paths;
 
 /// Owner/repo on GitHub — update this if the repo moves.
-const GITHUB_SLUG: &str = "honear/offspring";
+const GITHUB_SLUG: &str = "second-march/offspring";
 
 /// HTTP timeout for the release metadata check. The asset download uses a
 /// longer read timeout since it streams ~10-30 MB.
@@ -583,7 +583,7 @@ mod tests {
     #[test]
     fn trusted_host_accepts_github() {
         assert!(is_trusted_asset_host(
-            "https://github.com/honear/offspring/releases/download/v0.3.42/Offspring-Setup-0.3.42.exe"
+            "https://github.com/second-march/offspring/releases/download/v0.3.42/Offspring-Setup-0.3.42.exe"
         ));
         assert!(is_trusted_asset_host(
             "https://objects.githubusercontent.com/something/Offspring-Setup-0.3.42.exe"
@@ -594,7 +594,7 @@ mod tests {
     fn trusted_host_rejects_others() {
         assert!(!is_trusted_asset_host(""));
         assert!(!is_trusted_asset_host(
-            "http://github.com/honear/offspring/releases/download/v1/foo.exe"
+            "http://github.com/second-march/offspring/releases/download/v1/foo.exe"
         ));
         assert!(!is_trusted_asset_host(
             "https://evil.example.com/Offspring-Setup-0.3.42.exe"

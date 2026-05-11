@@ -1,0 +1,93 @@
+name: Bug report
+description: Something's broken or behaving unexpectedly.
+title: "[Bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report this! A bit of info up front
+        saves a lot of back-and-forth.
+
+        **Heads up:** if it's a security issue, please email
+        [dev@secondmarch.xyz](mailto:dev@secondmarch.xyz) instead of
+        filing here — see [SECURITY.md](https://github.com/second-march/offspring/blob/main/SECURITY.md).
+
+  - type: input
+    id: version
+    attributes:
+      label: Offspring version
+      description: |
+        Settings tab → "Current version" at the bottom. Or right-click
+        `Offspring-Setup-<version>.exe` → Properties → Details.
+      placeholder: e.g. 0.4.3
+    validations:
+      required: true
+
+  - type: input
+    id: windows
+    attributes:
+      label: Windows version
+      description: |
+        Win+R → type `winver` → Enter. Paste the line that starts with
+        "Version" (e.g. "Version 23H2 (OS Build 22631.4317)").
+      placeholder: e.g. Windows 11 Pro 23H2, OS Build 22631.4317
+    validations:
+      required: true
+
+  - type: input
+    id: ffmpeg
+    attributes:
+      label: FFmpeg version
+      description: |
+        Settings tab → FFmpeg block shows the path; the version is in the
+        first line of `ffmpeg -version`. If you used Offspring's bundled
+        download, just say "bundled essentials".
+      placeholder: e.g. bundled essentials / 7.1 / system-installed
+    validations:
+      required: false
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What did you do, what did you expect, and what did Offspring do instead?
+      placeholder: |
+        I right-clicked a 4K .mov and picked "GIF 420px LQ 20fps" but…
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: Numbered steps that someone else can follow on their own machine.
+      placeholder: |
+        1. Install Offspring 0.4.3
+        2. Right-click any .mov
+        3. Pick "GIF 420px LQ 20fps"
+        4. ...
+    validations:
+      required: false
+
+  - type: textarea
+    id: log
+    attributes:
+      label: Debug log (optional but very helpful)
+      description: |
+        Settings tab → "Open log folder" → grab `debug.log`. Trim it to
+        the section around the failure if it's huge. Paste here or attach
+        as a file.
+      render: shell
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: confirm
+    attributes:
+      label: Quick checks
+      options:
+        - label: I'm on the latest Offspring release (or this bug is in that latest release).
+          required: true
+        - label: I searched existing issues and didn't find a duplicate.
+          required: true

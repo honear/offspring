@@ -1,9 +1,12 @@
 [package]
 name = "offspring"
-version = "0.4.2"
+version = "0.4.3"
 description = "Offspring — right-click convert videos/images with FFmpeg"
 authors = ["Second March"]
 edition = "2021"
+repository = "https://github.com/second-march/offspring"
+homepage = "https://secondmarch.xyz/"
+license = "MIT"
 
 [lib]
 name = "offspring_lib"

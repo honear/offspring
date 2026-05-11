@@ -187,7 +187,7 @@ DACL because (F) makes it pointless.
 
 If someone hands you `Offspring-Setup-via-shady-link.exe`, we have no
 way to vet it. The official source is
-`https://github.com/honear/offspring/releases/latest`. A tampered
+`https://github.com/second-march/offspring/releases/latest`. A tampered
 installer running through Inno Setup is signed by us only if the
 attacker also has our minisign private key — which they shouldn't,
 per (B).

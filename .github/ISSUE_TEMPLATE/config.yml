@@ -1,0 +1,14 @@
+# Disable blank issues — direct people to one of the structured
+# templates above, OR to email/Discussions for the in-between cases.
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: mailto:dev@secondmarch.xyz
+    about: |
+      Please email security issues privately rather than opening a
+      public issue. See SECURITY.md for the disclosure flow.
+  - name: Question or general discussion
+    url: https://github.com/second-march/offspring/discussions
+    about: |
+      Open a discussion thread for usage questions, "is this possible
+      with Offspring?", or anything that isn't quite a bug or feature.

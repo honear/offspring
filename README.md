@@ -44,7 +44,7 @@ command lines, no upload to a web service.
 ## Install
 
 Grab the latest `Offspring-Setup-<version>.exe` from the
-[Releases page](https://github.com/honear/offspring/releases/latest) and run
+[Releases page](https://github.com/second-march/offspring/releases/latest) and run
 it. The installer is admin-only — that keeps every install in the same scope
 (no stacked per-user + machine copies) and lets it trust the shell-extension
 signing cert so the modern Windows 11 menu toggle works without prompts.
@@ -53,15 +53,16 @@ On first install, Offspring offers to download the LGPL essentials FFmpeg
 build (~80 MB) into `%LOCALAPPDATA%\Offspring\ffmpeg\`. You can also point
 the app at a pre-existing FFmpeg install from the Settings tab.
 
-Updates: once installed, Offspring checks GitHub Releases on launch,
-downloads a new installer in the background, and offers a one-click
-"Restart and install" when it's ready. Every installer is signed
-offline with an Ed25519 [minisign](https://jedisct1.github.io/minisign/)
-key whose public counterpart is pinned in the binary; the in-app
-updater verifies the signature against that key and refuses to
-launch any installer whose signature is missing or doesn't match.
-See [SECURITY.md](./SECURITY.md) and [THREAT_MODEL.md](./THREAT_MODEL.md)
-for the full picture.
+Updates: Offspring **never pings GitHub on its own**. It only checks
+for updates when you click **Settings → Check for updates**, and even
+then it just shows a banner — the new installer doesn't download until
+you click "Download" in that banner. Every installer is signed offline
+with an Ed25519 [minisign](https://jedisct1.github.io/minisign/) key
+whose public counterpart is pinned in the binary; the in-app updater
+verifies the signature against that key and refuses to launch any
+installer whose signature is missing or doesn't match. See
+[SECURITY.md](./SECURITY.md) and
+[THREAT_MODEL.md](./THREAT_MODEL.md) for the full picture.
 
 ## FFmpeg licensing
 
@@ -79,10 +80,18 @@ Full third-party attributions live in [NOTICE.md](./NOTICE.md).
 
 ## Privacy
 
-Offspring makes no analytics, telemetry, or phone-home calls. The only
-outbound network traffic is the GitHub Releases update check, the
-gyan.dev FFmpeg download (one-time, user-triggered), and the
-user-triggered installer download. Full inventory in
+Offspring makes no analytics, telemetry, or phone-home calls. The
+app makes **zero outbound requests on its own** — every network call
+is explicitly user-initiated:
+
+- **GitHub Releases update check** when you click *Settings → Check
+  for updates*.
+- **Installer download** when you click *Download* in the update
+  banner that follows.
+- **gyan.dev FFmpeg download** when you click *Download FFmpeg* on
+  first run (or any time later if you uninstall FFmpeg).
+
+Full inventory in
 [SECURITY.md → Privacy / network connections](./SECURITY.md#privacy--network-connections).
 
 ## License
