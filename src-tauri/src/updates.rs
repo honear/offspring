@@ -175,6 +175,16 @@ fn is_trusted_asset_host(url: &str) -> bool {
     ALLOWED.iter().any(|h| *h == host)
 }
 
+/// Return the installed version (`CARGO_PKG_VERSION`) WITHOUT making
+/// any network call. Used by the Settings page to render the "Current
+/// version: …" line without forcing a GitHub API hit on launch — the
+/// auto-check-on-startup behaviour was removed (see frontend), so the
+/// UI needs a local way to learn its own version.
+#[tauri::command]
+pub fn get_app_version() -> String {
+    env!("CARGO_PKG_VERSION").to_string()
+}
+
 #[tauri::command]
 pub fn check_for_updates() -> UpdateInfo {
     let current = env!("CARGO_PKG_VERSION").to_string();

@@ -209,6 +209,13 @@ export function onFinished(fn: (total: number) => void): Promise<UnlistenFn> {
  * Never throws — network errors collapse to `update_available: false`. */
 export const checkForUpdates = () => invoke<UpdateInfo>("check_for_updates");
 
+/** Return the installed Offspring version (`CARGO_PKG_VERSION`) WITHOUT
+ *  making any network call. The Settings page uses this to fill the
+ *  "Current version: …" line on launch — we deliberately don't auto-
+ *  hit GitHub anymore, so the UI needs a local way to learn its own
+ *  version. */
+export const getAppVersion = () => invoke<string>("get_app_version");
+
 /** Kick off a background download of the installer for `version` from
  * `installerUrl`. Progress arrives on `update-download`. Resolves as soon
  * as the worker thread is spawned — observe `onUpdateDownload` for

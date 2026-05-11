@@ -259,10 +259,28 @@
       if (!ok) event.preventDefault();
     });
 
-    // Fire-and-forget update check. We don't block reload on this, and any
-    // failure (no network / private repo / no releases yet) collapses to
-    // "no banner" rather than a visible error.
-    void checkUpdate();
+    // No automatic update check at launch — we explicitly do NOT touch
+    // the network without user action. The Settings → "Check for
+    // updates" button is the only path that pings GitHub. We still
+    // populate `currentVersion` (purely local — reads CARGO_PKG_VERSION
+    // from Rust) so the Settings page can display "Current version: X"
+    // without forcing a request. Network failures here would just
+    // leave the field blank, which is fine.
+    api.getAppVersion().then((v) => { currentVersion = v; }).catch(() => {});
+    // Warm-start the banner from sessionStorage so cross-route nav
+    // (e.g. progress → main) doesn't re-show a dismissed banner — but
+    // this is a pure cache read with no network and no auto-download.
+    try {
+      const cached = sessionStorage.getItem(UPDATE_CACHE_KEY);
+      const dismissedFor = sessionStorage.getItem(UPDATE_DISMISS_KEY);
+      if (cached) {
+        const parsed = JSON.parse(cached) as UpdateInfo;
+        if (parsed.current) currentVersion = parsed.current;
+        if (parsed.update_available && dismissedFor !== parsed.latest) {
+          update = parsed;
+        }
+      }
+    } catch {}
 
     // Subscribe to update download events before kicking off the check so
     // we never miss a "done" emitted from an auto-started download.
@@ -313,31 +331,22 @@
     }
   }
 
+  /// Manual update check. Only the Settings "Check for updates" button
+  /// calls this — we deliberately do NOT trigger it automatically at
+  /// app launch or on any background timer. Hitting GitHub is always
+  /// an explicit user action.
+  ///
+  /// On a successful check that finds an update, we just show the
+  /// banner — the installer is NOT downloaded automatically. The user
+  /// has to click the banner's "Download" button to start a transfer.
   async function checkUpdate(opts: { manual?: boolean } = {}) {
-    // Respect an in-session dismiss for this specific version so closing
-    // the banner stays closed until the app is relaunched (or a newer
-    // version lands). A manual re-check from Settings bypasses this —
-    // if the user explicitly asks, honour it.
+    // Respect an in-session dismiss for this specific version: closing
+    // the banner keeps it closed until the app is relaunched (or a
+    // newer version lands). A manual re-check bypasses this — if the
+    // user explicitly asks, honour it.
     const dismissedFor = opts.manual
       ? null
       : sessionStorage.getItem(UPDATE_DISMISS_KEY);
-
-    // Warm-start from cache so the banner renders without a round-trip
-    // when navigating between routes (progress → main, etc). Skipped on
-    // manual checks — the user wants a fresh answer.
-    if (!opts.manual) {
-      const cached = sessionStorage.getItem(UPDATE_CACHE_KEY);
-      if (cached) {
-        try {
-          const parsed = JSON.parse(cached) as UpdateInfo;
-          if (parsed.current) currentVersion = parsed.current;
-          if (parsed.update_available && dismissedFor !== parsed.latest) {
-            update = parsed;
-            maybeStartDownload(parsed);
-          }
-        } catch {}
-      }
-    }
 
     if (opts.manual) {
       updateCheck.checking = true;
@@ -350,7 +359,6 @@
       updateCheck.lastChecked = Date.now();
       if (info.update_available && dismissedFor !== info.latest) {
         update = info;
-        maybeStartDownload(info);
         if (opts.manual) {
           updateCheck.manualResult = `Version ${info.latest} is available.`;
         }
@@ -363,8 +371,8 @@
         }
       }
     } catch {
-      // Network fail = stay quiet on the automatic path. On a manual
-      // check the user asked, so surface it.
+      // Network failure: only surface to the user on a manual check
+      // (they asked, so we owe them feedback). Silent paths stay silent.
       if (opts.manual) {
         updateCheck.manualResult = "Couldn't reach the update server. Try again later.";
       }
@@ -1268,7 +1276,7 @@
             <h2 class="tool-title">Trim</h2>
           </div>
           <br>
-          <video class="tool-video" src="/examples/trim_low.mp4" autoplay muted loop playsinline></video>
+          <video class="tool-video" src="/examples/trim_low_modified.mp4" autoplay muted loop playsinline></video>
           <br>
           <p class="muted">
             Frame-accurate trim. Removes a chosen number of frames from the
@@ -1334,7 +1342,7 @@
             <h2 class="tool-title">Modify</h2>
           </div>
           <br>
-          <video class="tool-video" src="/examples/modify_low.mp4" autoplay muted loop playsinline></video>
+          <video class="tool-video" src="/examples/modify_low_modified.mp4" autoplay muted loop playsinline></video>
           <br>
           <p class="muted">
             "Modify" is an <strong>all-in-one</strong> transform dialog. It opens a mini window with a preview of your image or video. <br><br> Inside this window, you have access to a variety of tools to modify a particular image or video. It supports rectangular crop with handle-drag + aspect lock,
@@ -1361,6 +1369,8 @@
           <div class="editor-head">
             <h2 class="tool-title">Make Square</h2>
           </div>
+          <br>
+          <img class="tool-video" src="/examples/make_square_example.png" alt="Make Square example" />
           <br>
           <p class="muted">
             This tool was specifically added to solve a sometimes annoying issue with textures. It will take any image (e.g. a 1800x600px png) and add transparent marging on the smaller side to make it the same width and height. This is especially useful for textures that are not exactly square, but need to be square for UV reasons or just to avoid scaling manually to match the square aspect ratio.

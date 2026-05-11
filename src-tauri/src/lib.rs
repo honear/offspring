@@ -186,6 +186,7 @@ pub fn run() {
             commands::prepare_custom_encode,
             commands::prepare_trim_encode,
             updates::check_for_updates,
+            updates::get_app_version,
             updates::download_update,
             updates::install_update,
         ])
