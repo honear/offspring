@@ -26,17 +26,16 @@ $ErrorActionPreference = "Stop"
 Add-Type -AssemblyName System.Drawing
 
 $repoRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
-# Glob for whichever 1024×1024 PNG lives in Offspring_Icon\ — the user
-# drops different naming conventions over time (Offspring_Icon-… first,
-# then Offspring_Logo_v08-iOS-Default-…). Anything ending in
-# `-1024x1024@1x.png` counts as the master. If multiple match we pick
-# the most recently modified, which lines up with "I just dropped a
-# revised icon" workflows.
-$candidates = Get-ChildItem -Path (Join-Path $repoRoot "Offspring_Icon") `
-    -Filter "*-1024x1024@1x.png" -ErrorAction SilentlyContinue |
+# Glob for whichever 1024×1024 PNG lives in icon\ — naming has varied
+# over time (Offspring_Icon-…, Offspring_Logo_v08-iOS-Default-…, now
+# Offspring_Logo_v08-…). Anything ending in `-1024x1024@1x.png` counts
+# as the master. If multiple match we pick the most recently modified,
+# which lines up with the "I just dropped a revised icon" workflow.
+$iconDir = Join-Path $repoRoot "icon"
+$candidates = Get-ChildItem -Path $iconDir -Filter "*-1024x1024@1x.png" -ErrorAction SilentlyContinue |
     Sort-Object LastWriteTime -Descending
 if (-not $candidates) {
-    throw "No master icon found — expected a *-1024x1024@1x.png in Offspring_Icon\"
+    throw "No master icon found — expected a *-1024x1024@1x.png in $iconDir"
 }
 $source = $candidates[0].FullName
 Write-Host "Master: $source" -ForegroundColor Cyan
