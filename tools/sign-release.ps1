@@ -239,20 +239,43 @@ foreach ($p in $installers) {
             throw "minisign signing failed (exit $LASTEXITCODE) on $p"
         }
     } else {
-        # rsign reads the passphrase from stdin when `-W` is set. Pipe
-        # $env:MINISIGN_PASSWORD followed by a newline so it terminates
-        # the read cleanly. -x is the explicit sidecar path so we don't
-        # depend on rsign's default-path behaviour matching minisign's.
+        # rsign reads the passphrase from stdin when `-W` is set. We
+        # used to use PowerShell's `$str | native_command` pipe to feed
+        # it, but that path is unreliable: PowerShell goes through
+        # its formatting subsystem before writing to the child's stdin,
+        # which can re-encode bytes, drop or duplicate the trailing
+        # newline, or stall on macOS. Using .NET's ProcessStartInfo
+        # directly bypasses all of that — we get an explicit handle to
+        # the child's stdin and write the exact bytes we want.
         $sigPath = "$p.minisig"
-        $env:MINISIGN_PASSWORD + "`n" | & $toolBin.Source sign `
-            -W `
-            -s $KeyPath `
-            -x $sigPath `
-            -t $buildId `
-            -c $untrusted `
-            $p
-        if ($LASTEXITCODE -ne 0) {
-            throw "rsign signing failed (exit $LASTEXITCODE) on $p"
+        # Strip any trailing CR/LF that may have ridden along with the
+        # secret value (common when a CRLF-flavoured string was pasted
+        # into the GH secret UI). Without this rsign sees "password\r"
+        # and fails with "Wrong password for that key".
+        $pw = $env:MINISIGN_PASSWORD -replace '[\r\n]+$', ''
+        Write-Host "  (password length: $($pw.Length))" -ForegroundColor DarkGray
+
+        $psi = New-Object System.Diagnostics.ProcessStartInfo
+        $psi.FileName = $toolBin.Source
+        foreach ($arg in @('sign', '-W',
+                           '-s', $KeyPath,
+                           '-x', $sigPath,
+                           '-t', $buildId,
+                           '-c', $untrusted,
+                           $p)) {
+            [void]$psi.ArgumentList.Add($arg)
+        }
+        $psi.RedirectStandardInput = $true
+        $psi.UseShellExecute = $false
+        $proc = [System.Diagnostics.Process]::Start($psi)
+        # WriteLine appends the platform newline, but rsign reads until
+        # the first \n regardless of OS — so a trailing \n is correct
+        # on every runner.
+        $proc.StandardInput.WriteLine($pw)
+        $proc.StandardInput.Close()
+        $proc.WaitForExit()
+        if ($proc.ExitCode -ne 0) {
+            throw "rsign signing failed (exit $($proc.ExitCode)) on $p"
         }
     }
 
