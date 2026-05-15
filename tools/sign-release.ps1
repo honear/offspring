@@ -268,10 +268,18 @@ foreach ($p in $installers) {
         $psi.RedirectStandardInput = $true
         $psi.UseShellExecute = $false
         $proc = [System.Diagnostics.Process]::Start($psi)
-        # WriteLine appends the platform newline, but rsign reads until
-        # the first \n regardless of OS — so a trailing \n is correct
-        # on every runner.
-        $proc.StandardInput.WriteLine($pw)
+        # Write the password as raw UTF-8 bytes + a single LF to the
+        # child's stdin. We deliberately bypass StreamWriter.WriteLine
+        # because its `NewLine` defaults to `Environment.NewLine`, which
+        # is `\r\n` on Windows runners — that produces `password\r\n` on
+        # the wire, rsign reads to the first `\n` and ends up with
+        # `password\r`, then reports "Wrong password for that key" after
+        # a slow Argon2 derivation against the wrong input. Writing
+        # raw bytes with an explicit LF eliminates the platform-dependent
+        # newline and any StreamWriter encoding surprises (BOM, etc.).
+        $stdinBytes = [System.Text.Encoding]::UTF8.GetBytes($pw + "`n")
+        $proc.StandardInput.BaseStream.Write($stdinBytes, 0, $stdinBytes.Length)
+        $proc.StandardInput.BaseStream.Flush()
         $proc.StandardInput.Close()
         $proc.WaitForExit()
         if ($proc.ExitCode -ne 0) {
