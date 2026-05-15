@@ -1,6 +1,6 @@
 [package]
 name = "offspring"
-version = "0.5.0-b0001"
+version = "0.5.0-b0002"
 description = "Offspring â€” right-click convert videos/images with FFmpeg"
 authors = ["Second March"]
 edition = "2021"

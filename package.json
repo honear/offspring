@@ -1,6 +1,6 @@
 {
   "name": "offspring",
-  "version": "0.5.0-b0001",
+  "version": "0.5.0-b0002",
   "description": "Right-click FFmpeg conversion presets for Windows 11",
   "type": "module",
   "scripts": {
