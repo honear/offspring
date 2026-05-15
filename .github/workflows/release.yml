@@ -101,16 +101,17 @@ jobs:
           cargo install rsign2 --locked --quiet
 
           $keyPath = Join-Path $env:RUNNER_TEMP "minisign.key"
-          # Strip CR characters: when the key was pasted into the GH
-          # secret from a Windows context, line endings can land as
-          # CRLF. The reference C minisign tolerates whitespace inside
-          # the base64 blob, but rsign2's strict base64 parser rejects
-          # \r — which corrupts the decoded ciphertext and surfaces as
-          # "Wrong password for that key". WriteAllText with -NoNewline
-          # semantics handled the trailing-newline case; this handles
-          # the embedded-CR case.
-          $keyContent = $env:MINISIGN_PRIVATE_KEY -replace "`r", ""
-          [System.IO.File]::WriteAllText($keyPath, $keyContent)
+          # Write the secret value as-is. We previously stripped \r
+          # bytes here on the theory that rsign2's base64 parser
+          # rejected CR — but the local rsign2 test with the actual
+          # CRLF key file succeeded, which proved rsign tolerates the
+          # line endings. Stripping was therefore mutating bytes that
+          # rsign expected to see; the file the CI runner needs is the
+          # one that's byte-identical to what works locally.
+          [System.IO.File]::WriteAllBytes(
+              $keyPath,
+              [System.Text.Encoding]::UTF8.GetBytes($env:MINISIGN_PRIVATE_KEY)
+          )
 
           # Diagnostic — see the parallel comment in the Mac sign step.
           # None of these leak private key material; they let us
@@ -238,9 +239,10 @@ jobs:
           cargo install rsign2 --locked --quiet
 
           key_path="$RUNNER_TEMP/minisign.key"
-          # Strip CR characters before writing — see the parallel
-          # comment in the Windows sign step.
-          printf '%s' "$MINISIGN_PRIVATE_KEY" | tr -d '\r' > "$key_path"
+          # Write the secret value as-is. See the parallel comment in
+          # the Windows sign step — local rsign2 test succeeded on the
+          # original CRLF file, so the CR-strip was the bug.
+          printf '%s' "$MINISIGN_PRIVATE_KEY" > "$key_path"
           chmod 600 "$key_path"
 
           # Diagnostic block — log the size, header line, and a sha256
