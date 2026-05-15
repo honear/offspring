@@ -218,6 +218,27 @@ pub fn run() {
                 }
             }
 
+            // Auto-download ffmpeg in the background when nothing is
+            // resolvable — no user-configured path in settings, no
+            // managed copy already installed, and no `ffmpeg` on PATH.
+            // Standard build only; Studio explicitly ships with no
+            // outbound network calls. The download runs on a background
+            // thread (spawn_download returns immediately), so the main
+            // window comes up without waiting on the network. Progress
+            // surfaces through the `ffmpeg-download` event the Settings
+            // UI already listens for; an in-progress encode is still
+            // gated on ffmpeg being present, so the user gets a clear
+            // "not ready yet" error if they try to convert before the
+            // background install finishes.
+            #[cfg(not(feature = "studio"))]
+            {
+                let settings = presets::load_settings().unwrap_or_default();
+                if ffmpeg::resolve_ffmpeg(&settings).is_err() {
+                    dlog!("auto-download: ffmpeg unresolvable, kicking off bootstrap");
+                    bootstrap::spawn_download(handle.clone());
+                }
+            }
+
             // Seed pending state with the primary's own command and start
             // the debounce clock. If this is a multi-file right-click,
             // more args will land via the single_instance listener

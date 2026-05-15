@@ -42,7 +42,18 @@ pub fn settings_path() -> Result<PathBuf> {
 }
 
 pub fn ffmpeg_managed_path() -> Result<PathBuf> {
-    Ok(local_data_dir()?.join("ffmpeg").join("bin").join("ffmpeg.exe"))
+    // Windows: %LOCALAPPDATA%\Offspring\ffmpeg\bin\ffmpeg.exe
+    //   (matches gyan.dev's archive layout — top-level dir holds bin/)
+    // macOS:   ~/Library/Application Support/Offspring/ffmpeg/bin/ffmpeg
+    //   (we mirror the bin/ subdir for consistency even though the
+    //   Mac archive is just a flat binary — bootstrap extracts it
+    //   into bin/ for symmetry across platforms)
+    let base = local_data_dir()?.join("ffmpeg").join("bin");
+    #[cfg(windows)]
+    let exe = base.join("ffmpeg.exe");
+    #[cfg(not(windows))]
+    let exe = base.join("ffmpeg");
+    Ok(exe)
 }
 
 /// Scratch directory for encode intermediates — palette PNGs, concat
