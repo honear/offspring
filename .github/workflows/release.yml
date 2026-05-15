@@ -101,17 +101,16 @@ jobs:
           cargo install rsign2 --locked --quiet
 
           $keyPath = Join-Path $env:RUNNER_TEMP "minisign.key"
-          # Write the secret value as-is. We previously stripped \r
-          # bytes here on the theory that rsign2's base64 parser
-          # rejected CR — but the local rsign2 test with the actual
-          # CRLF key file succeeded, which proved rsign tolerates the
-          # line endings. Stripping was therefore mutating bytes that
-          # rsign expected to see; the file the CI runner needs is the
-          # one that's byte-identical to what works locally.
-          [System.IO.File]::WriteAllBytes(
-              $keyPath,
-              [System.Text.Encoding]::UTF8.GetBytes($env:MINISIGN_PRIVATE_KEY)
-          )
+          # The MINISIGN_PRIVATE_KEY secret is stored as the base64
+          # encoding of the .key file's raw bytes (NOT the textual
+          # contents). This sidesteps GitHub Secrets' inconsistent
+          # multi-line handling entirely — base64 is a single ASCII
+          # line, so paste-time CR insertion, whitespace collapsing,
+          # and "newlines turning into spaces" all become impossible.
+          # We FromBase64String → WriteAllBytes to get a file that's
+          # byte-identical to the local .key file.
+          $keyBytes = [Convert]::FromBase64String($env:MINISIGN_PRIVATE_KEY)
+          [System.IO.File]::WriteAllBytes($keyPath, $keyBytes)
 
           # Diagnostic — see the parallel comment in the Mac sign step.
           # None of these leak private key material; they let us
@@ -245,10 +244,9 @@ jobs:
           cargo install rsign2 --locked --quiet
 
           key_path="$RUNNER_TEMP/minisign.key"
-          # Write the secret value as-is. See the parallel comment in
-          # the Windows sign step — local rsign2 test succeeded on the
-          # original CRLF file, so the CR-strip was the bug.
-          printf '%s' "$MINISIGN_PRIVATE_KEY" > "$key_path"
+          # MINISIGN_PRIVATE_KEY is base64 of the .key file's raw bytes.
+          # See the parallel comment on the Windows sign step.
+          printf '%s' "$MINISIGN_PRIVATE_KEY" | base64 -d > "$key_path"
           chmod 600 "$key_path"
 
           # Diagnostic block — log the size, header line, and a sha256
