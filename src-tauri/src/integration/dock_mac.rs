@@ -28,6 +28,7 @@ use objc2_foundation::MainThreadMarker;
 /// foreground. Call from the main settings window's open path so the
 /// Dock icon appears alongside the window and the user can ⌘-Tab to
 /// it like any other app.
+#[allow(deprecated)] // intentional — see comment on activateIgnoringOtherApps below
 pub fn set_regular() {
     // SAFETY: caller must dispatch via `app.run_on_main_thread`.
     let mtm = unsafe { MainThreadMarker::new_unchecked() };
@@ -54,6 +55,7 @@ pub fn set_accessory() {
 /// flows (Services pick → progress, menu bar tray click → popover):
 /// the app needs to be foreground for the new window's setFocus to
 /// land, but we don't want to flip to Regular and pollute the Dock.
+#[allow(deprecated)] // intentional — see comment in set_regular
 pub fn activate_without_dock() {
     let mtm = unsafe { MainThreadMarker::new_unchecked() };
     let app = NSApp(mtm);
