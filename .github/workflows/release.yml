@@ -112,6 +112,21 @@ jobs:
           $keyContent = $env:MINISIGN_PRIVATE_KEY -replace "`r", ""
           [System.IO.File]::WriteAllText($keyPath, $keyContent)
 
+          # Diagnostic — see the parallel comment in the Mac sign step.
+          # None of these leak private key material; they let us
+          # confirm the bytes that landed on the runner match the
+          # bytes on your PC.
+          Write-Host "--- key diagnostics ---"
+          $info = Get-Item $keyPath
+          Write-Host "size: $($info.Length) bytes"
+          $firstLine = Get-Content $keyPath -TotalCount 1
+          Write-Host "header: $firstLine"
+          $hash = (Get-FileHash $keyPath -Algorithm SHA256).Hash.ToLower()
+          Write-Host "sha256: $hash"
+          $lc = (Get-Content $keyPath | Measure-Object -Line).Lines
+          Write-Host "line count: $lc"
+          Write-Host "-----------------------"
+
           $version = "${{ steps.ver.outputs.version }}"
           $standard = "installer\dist\Offspring-Setup-$version.exe"
           $studio   = "installer\dist\Offspring-Studio-Setup-$version.exe"
@@ -224,11 +239,22 @@ jobs:
 
           key_path="$RUNNER_TEMP/minisign.key"
           # Strip CR characters before writing — see the parallel
-          # comment in the Windows sign step. Same issue: CRLF-pasted
-          # GH secret + strict rsign2 base64 parser = "Wrong password"
-          # because the decoded ciphertext is corrupted.
+          # comment in the Windows sign step.
           printf '%s' "$MINISIGN_PRIVATE_KEY" | tr -d '\r' > "$key_path"
           chmod 600 "$key_path"
+
+          # Diagnostic block — log the size, header line, and a sha256
+          # of the key file as written. None of these leak the private
+          # key material, but they let us compare what landed in CI
+          # against the local file byte-for-byte. Compare with:
+          #   (Get-FileHash installer\.minisign\offspring.key -Algorithm SHA256).Hash.ToLower()
+          # on your PC.
+          echo "--- key diagnostics ---"
+          echo "size: $(wc -c < "$key_path") bytes"
+          echo "header: $(head -n1 "$key_path")"
+          echo "sha256: $(shasum -a 256 "$key_path" | awk '{print $1}')"
+          echo "line count: $(wc -l < "$key_path")"
+          echo "-----------------------"
 
           # macos-latest ships pwsh — same script as Windows uses.
           # PowerShell auto-promotes a single string to a one-element
