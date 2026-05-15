@@ -62,6 +62,11 @@ pub fn icons_dir() -> Result<PathBuf> {
     Ok(p)
 }
 
+/// Windows SendTo folder. macOS has no equivalent (the conceptual
+/// analogue is the Services menu, populated via Info.plist instead
+/// of by writing .lnk shortcuts to a folder). Gated to Windows so
+/// the macOS build doesn't carry a dead helper.
+#[cfg(windows)]
 pub fn sendto_dir() -> Result<PathBuf> {
     let mut p = dirs::data_dir().context("no APPDATA directory")?;
     p.push("Microsoft");
@@ -74,6 +79,7 @@ pub fn sendto_dir() -> Result<PathBuf> {
 /// recognize our own shortcuts by a shared "Offspring - " filename prefix, but
 /// the user asked for shorter names. Without a marker we can't tell our .lnks
 /// apart from unrelated SendTo entries, so we track them ourselves.
+#[cfg(windows)]
 pub fn sendto_manifest_path() -> Result<PathBuf> {
     Ok(data_dir()?.join("sendto-manifest.json"))
 }
