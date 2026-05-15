@@ -26,8 +26,18 @@
 //! applies each integration according to the toggles and leaves the OS in
 //! a state that matches the current app config.
 
+// All three back-ends are Windows-only: context_menu writes HKCU
+// registry keys, sendto creates Win32 .lnk files via mslnk, and
+// modern_menu drives MSIX/PowerShell. None of them have a macOS
+// analogue today — the eventual Mac right-click surface (NSServices,
+// Info.plist) lives in a separate module written when that work
+// lands. Until then, the macOS build sees stubbed sync_all / cleanup_all
+// implementations below.
+#[cfg(windows)]
 pub mod context_menu;
+#[cfg(windows)]
 pub mod modern_menu;
+#[cfg(windows)]
 pub mod sendto;
 
 use anyhow::Result;
@@ -38,6 +48,7 @@ use crate::presets::{Preset, Settings};
 /// integrations that are toggled off, this actively _removes_ whatever
 /// they previously installed — so flipping a toggle off in Settings
 /// cleans up immediately instead of at uninstall time.
+#[cfg(windows)]
 pub fn sync_all(presets: &[Preset], settings: &Settings) -> Result<()> {
     // Modern menu and classic menu are mutually exclusive. If we wrote both,
     // Windows 11 would show the modern entry at the top level AND the
@@ -61,8 +72,19 @@ pub fn sync_all(presets: &[Preset], settings: &Settings) -> Result<()> {
     Ok(())
 }
 
+/// macOS stub. The eventual Mac integration (NSServices Info.plist
+/// generation, Finder document-type association) will be written as
+/// a `macos` submodule and dispatched from here. Today this is a
+/// no-op so build pipelines and first-run hooks can call sync_all
+/// without branching at every call site.
+#[cfg(not(windows))]
+pub fn sync_all(_presets: &[Preset], _settings: &Settings) -> Result<()> {
+    Ok(())
+}
+
 /// Remove everything this module installs. Called by the uninstaller's
 /// `cleanup` subcommand.
+#[cfg(windows)]
 pub fn cleanup_all() -> Result<()> {
     let _ = context_menu::cleanup();
     let _ = sendto::cleanup();
@@ -72,5 +94,11 @@ pub fn cleanup_all() -> Result<()> {
     // doesn't break the others.
     let hkcu = winreg::RegKey::predef(winreg::enums::HKEY_CURRENT_USER);
     let _ = hkcu.delete_subkey_all(r"Software\Offspring");
+    Ok(())
+}
+
+/// macOS stub for cleanup_all. Nothing to remove today.
+#[cfg(not(windows))]
+pub fn cleanup_all() -> Result<()> {
     Ok(())
 }

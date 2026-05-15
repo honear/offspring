@@ -134,9 +134,21 @@ pub fn sync_integrations() -> Result<(), String> {
 /// Kill + relaunch Explorer so it picks up a freshly-registered shell
 /// extension. The frontend only calls this after the user confirms via
 /// a dialog — `modern_menu::sync` never invokes it silently.
+#[cfg(windows)]
 #[tauri::command]
 pub fn restart_explorer() -> Result<(), String> {
     integration::modern_menu::restart_explorer().map_err(|e| e.to_string())
+}
+
+/// macOS stub for restart_explorer. The modern right-click menu
+/// concept doesn't exist on macOS (no MSIX, no Explorer handler
+/// cache to invalidate), so the frontend should never call this —
+/// the studio-style get_build_variant + UI gating handles that.
+/// Stub returns Ok so a stray call doesn't surface as an error.
+#[cfg(not(windows))]
+#[tauri::command]
+pub fn restart_explorer() -> Result<(), String> {
+    Ok(())
 }
 
 /// In-app "Set up Windows 11 modern menu" — for users who unchecked
@@ -148,6 +160,7 @@ pub fn restart_explorer() -> Result<(), String> {
 /// setting calls for. No admin rights — everything is user-scope.
 /// The frontend should call `restart_explorer` afterwards (gated on
 /// the usual confirm dialog) so the entries appear immediately.
+#[cfg(windows)]
 #[tauri::command]
 pub fn setup_modern_menu() -> Result<(), String> {
     integration::modern_menu::trust_cert_user_scope().map_err(|e| e.to_string())?;
@@ -163,10 +176,21 @@ pub fn setup_modern_menu() -> Result<(), String> {
     integration::modern_menu::sync(&presets_list, &settings).map_err(|e| e.to_string())
 }
 
+/// macOS stub for setup_modern_menu. Same reasoning as
+/// restart_explorer — no Windows-style MSIX modern menu exists on
+/// Mac. The Mac-side equivalent (NSServices) is registered via
+/// Info.plist at install time, not at runtime through this API.
+#[cfg(not(windows))]
+#[tauri::command]
+pub fn setup_modern_menu() -> Result<(), String> {
+    Err("The Windows 11 modern menu is Windows-only. On macOS, Offspring registers a Services entry via Info.plist at install time.".into())
+}
+
 /// Resolve `%SystemRoot%\explorer.exe`, falling back to the bare
 /// name on systems where `SystemRoot` is scrubbed. Used by the
 /// folder-opening commands; pulled out so we don't repeat the
 /// path-planting defense logic for each new entry.
+#[cfg(windows)]
 fn explorer_path() -> std::path::PathBuf {
     match std::env::var_os("SystemRoot") {
         Some(root) => {
@@ -181,13 +205,27 @@ fn explorer_path() -> std::path::PathBuf {
     }
 }
 
+/// Open the user's Offspring data folder in the OS's native file
+/// browser. Windows: spawn Explorer. macOS: spawn `open` (which uses
+/// Finder by default). Same UX outcome — a window appears showing
+/// the contents of `%APPDATA%\Offspring` / `~/Library/Application Support/Offspring`.
 #[tauri::command]
 pub fn open_data_folder() -> Result<(), String> {
     let p = paths::data_dir().map_err(|e| e.to_string())?;
-    std::process::Command::new(explorer_path())
-        .arg(&p)
-        .spawn()
-        .map_err(|e| e.to_string())?;
+    #[cfg(windows)]
+    {
+        std::process::Command::new(explorer_path())
+            .arg(&p)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("/usr/bin/open")
+            .arg(&p)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
     Ok(())
 }
 
@@ -200,49 +238,74 @@ pub fn open_data_folder() -> Result<(), String> {
 /// If the log file doesn't exist yet (no encode has logged anything)
 /// we fall back to opening the parent directory, otherwise Explorer
 /// shows an empty/default view.
+/// Open the folder containing the debug log
+/// (`%LOCALAPPDATA%\Offspring` on Windows, `~/Library/Application Support/Offspring`
+/// on macOS) in the native file browser with `debug.log` selected
+/// when it exists. Windows uses Explorer's `/select,<path>` switch;
+/// macOS uses `open -R <path>` (Reveal in Finder) for the same UX.
 #[tauri::command]
 pub fn open_log_folder() -> Result<(), String> {
     let log_path = crate::debug_log::log_path()
         .ok_or_else(|| "Could not resolve debug log path.".to_string())?;
-    let exe = explorer_path();
-    if log_path.exists() {
-        // /select,<path> highlights the file in its parent folder.
-        // The leading comma is required and there's no space after
-        // it — that's how Explorer parses the switch.
-        std::process::Command::new(exe)
-            .arg(format!("/select,{}", log_path.display()))
-            .spawn()
-            .map_err(|e| e.to_string())?;
-    } else {
-        let parent = log_path
-            .parent()
-            .ok_or_else(|| "Log path has no parent directory.".to_string())?;
-        // Make sure the parent exists before asking Explorer to
-        // open it — `local_data_dir()` already creates Offspring/
-        // but the folder could still be missing if the user wiped
-        // it manually.
-        let _ = std::fs::create_dir_all(parent);
-        std::process::Command::new(exe)
-            .arg(parent)
-            .spawn()
-            .map_err(|e| e.to_string())?;
+    let parent_dir = log_path
+        .parent()
+        .ok_or_else(|| "Log path has no parent directory.".to_string())?;
+    // Make sure the parent exists before asking the OS to open it -
+    // `local_data_dir()` already creates Offspring/ but the folder
+    // could still be missing if the user wiped it manually.
+    let _ = std::fs::create_dir_all(parent_dir);
+
+    #[cfg(windows)]
+    {
+        let exe = explorer_path();
+        if log_path.exists() {
+            // /select,<path> highlights the file in its parent folder.
+            // The leading comma is required and there's no space after
+            // it - that's how Explorer parses the switch.
+            std::process::Command::new(exe)
+                .arg(format!("/select,{}", log_path.display()))
+                .spawn()
+                .map_err(|e| e.to_string())?;
+        } else {
+            std::process::Command::new(exe)
+                .arg(parent_dir)
+                .spawn()
+                .map_err(|e| e.to_string())?;
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        // `open -R` reveals a file in Finder (highlights it in its
+        // parent). Bare `open` on a directory opens the dir itself.
+        if log_path.exists() {
+            std::process::Command::new("/usr/bin/open")
+                .args(["-R", &log_path.display().to_string()])
+                .spawn()
+                .map_err(|e| e.to_string())?;
+        } else {
+            std::process::Command::new("/usr/bin/open")
+                .arg(parent_dir)
+                .spawn()
+                .map_err(|e| e.to_string())?;
+        }
     }
     Ok(())
 }
 
 /// Hand off an https/http URL to the user's default browser via the
-/// Windows shell's URL association. Used for the "Second March" credit
-/// link in the topbar — the `tauri-plugin-opener` JS API was silently
-/// failing in WebView2 even with `opener:allow-open-url` granted, and
-/// debugging that turned out to be a worse use of time than just doing
-/// the dispatch ourselves.
+/// OS's URL association. Used for the "Second March" credit link in
+/// the topbar — the `tauri-plugin-opener` JS API was silently failing
+/// in WebView2 even with `opener:allow-open-url` granted, and
+/// debugging that turned out to be a worse use of time than just
+/// doing the dispatch ourselves.
 ///
-/// Implementation: `cmd /c start "" <url>`. The empty `""` is the
-/// window title arg that `start` expects when the second token is
-/// quoted; without it `start "https://…"` interprets the URL as the
-/// title and opens nothing. Using `cmd /c start` rather than
-/// `ShellExecuteW` keeps the call out of any blocking COM context
-/// the webview might be on.
+/// Implementation:
+///   - Windows: `cmd /c start "" <url>`. The empty `""` is the window
+///     title arg that `start` expects when the second token is quoted;
+///     without it `start "https://…"` interprets the URL as the title
+///     and opens nothing.
+///   - macOS: `/usr/bin/open <url>`. macOS's URL dispatcher routes to
+///     the user's default browser.
 ///
 /// We refuse anything that isn't `http://` or `https://` so this can't
 /// be coerced into running a local file or a wacky URI scheme.
@@ -252,10 +315,20 @@ pub fn open_external_url(url: String) -> Result<(), String> {
     if !(lower.starts_with("http://") || lower.starts_with("https://")) {
         return Err(format!("refusing non-http(s) URL: {url}"));
     }
-    std::process::Command::new("cmd")
-        .args(["/C", "start", "", &url])
-        .spawn()
-        .map_err(|e| e.to_string())?;
+    #[cfg(windows)]
+    {
+        std::process::Command::new("cmd")
+            .args(["/C", "start", "", &url])
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("/usr/bin/open")
+            .arg(&url)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
     Ok(())
 }
 
