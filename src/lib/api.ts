@@ -51,6 +51,11 @@ export const setupModernMenu = () => invoke<void>("setup_modern_menu");
  *  hides the buttons that would call into compiled-out code paths
  *  (Download FFmpeg, Check for updates, Reinstall modern menu). */
 export const getBuildVariant = () => invoke<"standard" | "studio">("get_build_variant");
+
+/** Returns the OS the binary is running on. Lets the frontend
+ *  conditionally hide platform-specific UI — e.g. NVIDIA NVENC
+ *  toggle hidden on macOS, since Mac falls back to libx264 regardless. */
+export const getPlatform = () => invoke<"windows" | "macos" | "linux">("get_platform");
 export const openDataFolder = () => invoke<void>("open_data_folder");
 /** Open `%LOCALAPPDATA%\Offspring` in Explorer with `debug.log`
  *  selected (or just the directory when the log doesn't exist yet). */

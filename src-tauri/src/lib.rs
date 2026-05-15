@@ -158,6 +158,7 @@ pub fn run() {
             commands::ffmpeg_status,
             commands::download_ffmpeg,
             commands::get_build_variant,
+            commands::get_platform,
             commands::get_custom_last,
             commands::save_custom_last,
             commands::get_trim_last,

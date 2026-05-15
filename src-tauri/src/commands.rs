@@ -83,6 +83,20 @@ pub fn get_build_variant() -> &'static str {
     if cfg!(feature = "studio") { "studio" } else { "standard" }
 }
 
+/// Reports the OS the binary is running on. Lets the frontend
+/// conditionally hide platform-specific UI — e.g. the NVIDIA NVENC
+/// checkbox makes no sense on macOS where we fall back to libx264
+/// regardless of the toggle's value.
+#[tauri::command]
+pub fn get_platform() -> &'static str {
+    #[cfg(windows)]
+    { "windows" }
+    #[cfg(target_os = "macos")]
+    { "macos" }
+    #[cfg(all(not(windows), not(target_os = "macos")))]
+    { "linux" }
+}
+
 #[tauri::command]
 pub fn ffmpeg_status() -> FfmpegStatus {
     let s = presets::load_settings().unwrap_or_default();

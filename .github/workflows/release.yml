@@ -139,6 +139,12 @@ jobs:
           }
 
       - name: Upload Windows artifacts
+        # always() so we still get the unsigned installers out when the
+        # sign step fails — without this, a sign failure on the line
+        # above means no .exe ever lands on the run page, and we lose
+        # the ability to install and smoke-test the build manually
+        # while debugging the signing path.
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: windows-installers
@@ -268,6 +274,8 @@ jobs:
           rm -f "$key_path"
 
       - name: Upload macOS artifacts
+        # always() — see comment on the Windows upload step.
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: macos-installer
