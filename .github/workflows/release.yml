@@ -91,12 +91,19 @@ jobs:
         shell: pwsh
         env:
           MINISIGN_PRIVATE_KEY: ${{ secrets.MINISIGN_PRIVATE_KEY }}
-          MINISIGN_PASSWORD: ${{ secrets.MINISIGN_PASSWORD }}
+          MINISIGN_PASSWORD_B64: ${{ secrets.MINISIGN_PASSWORD_B64 }}
         run: |
           if ([string]::IsNullOrEmpty($env:MINISIGN_PRIVATE_KEY)) {
             Write-Host "MINISIGN_PRIVATE_KEY not set - skipping signing." -ForegroundColor Yellow
             exit 0
           }
+          # Decode the base64-encoded password into the env var the
+          # signing script reads. See the parallel comment on the
+          # MINISIGN_PRIVATE_KEY decoding for the rationale — same
+          # class of GH-Secrets whitespace bug we're sidestepping.
+          $env:MINISIGN_PASSWORD = [System.Text.Encoding]::UTF8.GetString(
+              [Convert]::FromBase64String($env:MINISIGN_PASSWORD_B64)
+          )
           Write-Host "Installing rsign2..." -ForegroundColor Cyan
           cargo install rsign2 --locked --quiet
 
@@ -233,13 +240,16 @@ jobs:
       - name: Sign .dmg (rsign)
         env:
           MINISIGN_PRIVATE_KEY: ${{ secrets.MINISIGN_PRIVATE_KEY }}
-          MINISIGN_PASSWORD: ${{ secrets.MINISIGN_PASSWORD }}
+          MINISIGN_PASSWORD_B64: ${{ secrets.MINISIGN_PASSWORD_B64 }}
           DMG_PATH: ${{ steps.dmg.outputs.path }}
         run: |
           if [ -z "$MINISIGN_PRIVATE_KEY" ]; then
             echo "MINISIGN_PRIVATE_KEY not set - skipping signing."
             exit 0
           fi
+          # Decode the base64-encoded password. See parallel comment
+          # in the Windows sign step for the rationale.
+          export MINISIGN_PASSWORD=$(printf '%s' "$MINISIGN_PASSWORD_B64" | base64 -d)
           echo "Installing rsign2..."
           cargo install rsign2 --locked --quiet
 
