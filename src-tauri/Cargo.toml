@@ -90,6 +90,18 @@ minisign-verify = "0.2"
 mslnk = "0.1"
 winreg = "0.55"
 
+# macOS-only dependencies. objc2 + its Foundation/AppKit bindings let
+# us declare a custom Objective-C class for the NSServices provider
+# (integration/services_mac.rs). The provider receives "Offspring…"
+# right-click invocations from Finder, reads the file URLs out of the
+# system pasteboard, and routes them into Tauri's event bus where the
+# picker window picks them up. None of this is needed on Windows where
+# the right-click flow is registry/MSIX-based instead.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.5"
+objc2-foundation = "0.2"
+objc2-app-kit = "0.2"
+
 [profile.release]
 codegen-units = 1
 lto = true

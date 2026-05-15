@@ -1525,6 +1525,74 @@ pub fn open_modify_window(app: &tauri::AppHandle, files: Vec<String>) -> anyhow:
     Ok(())
 }
 
+/// Picker → run a preset on its pending files. Called when the user
+/// clicks a preset row in the macOS Services picker window. Routes
+/// through the existing `encode` command so the encode logic stays
+/// single-sourced.
+#[tauri::command]
+pub fn pick_run_preset(
+    app: tauri::AppHandle,
+    files: Vec<String>,
+    preset_id: String,
+) -> Result<(), String> {
+    let presets = presets::load_presets().map_err(|e| e.to_string())?;
+    let preset = presets
+        .into_iter()
+        .find(|p| p.id == preset_id)
+        .ok_or_else(|| format!("preset '{preset_id}' not found"))?;
+    open_progress_window(&app).map_err(|e| e.to_string())?;
+    app.manage_pending_files(files.clone());
+    encode(app, files, preset)
+}
+
+/// Picker → open a tool's dialog window with the pending files. The
+/// tool's own UI then drives the rest of the flow (collect parameters,
+/// navigate to /progress/, call encode_*).
+#[tauri::command]
+pub fn pick_run_tool(
+    app: tauri::AppHandle,
+    files: Vec<String>,
+    tool: String,
+) -> Result<(), String> {
+    match tool.as_str() {
+        "modify" => open_modify_window(&app, files).map_err(|e| e.to_string()),
+        "trim" => open_trim_window(&app, files).map_err(|e| e.to_string()),
+        "compare" => open_compare_grid_window(&app, files).map_err(|e| e.to_string()),
+        other => Err(format!("unknown tool: {other}")),
+    }
+}
+
+/// macOS Services picker. Opens a small window listing every enabled
+/// preset + tool so the user can pick what to run on the files that
+/// were selected in Finder. Called from the NSServices provider
+/// (integration/services_mac.rs) after it reads file URLs out of the
+/// pasteboard.
+///
+/// Sibling of `open_modify_window` etc. — same focus dance, same
+/// pending-files handoff pattern. We hide-on-build so the OS window
+/// doesn't flash with a blank frame; the frontend reveals it after
+/// first paint.
+pub fn open_pick_window(app: &tauri::AppHandle, files: Vec<String>) -> anyhow::Result<()> {
+    let (pw, ph) = (520.0, 600.0);
+    let mut b = WebviewWindowBuilder::new(app, "pick", WebviewUrl::App("pick/".into()))
+        .title("Offspring")
+        .inner_size(pw, ph)
+        .min_inner_size(420.0, 380.0)
+        .resizable(true)
+        .focused(true)
+        .visible(false);
+    if let Some((x, y)) = position_near_cursor(app, pw, ph) {
+        b = b.position(x, y);
+    }
+    let w = b.build()?;
+    app.manage_pending_files(files);
+    let _ = w.unminimize();
+    let _ = w.set_always_on_top(true);
+    let _ = w.set_focus();
+    let _ = w.set_always_on_top(false);
+    Ok(())
+}
+
 pub fn open_trim_window(app: &tauri::AppHandle, files: Vec<String>) -> anyhow::Result<()> {
     let (pw, ph) = (440.0, 420.0);
     let mut b = WebviewWindowBuilder::new(app, "trim", WebviewUrl::App("trim/".into()))

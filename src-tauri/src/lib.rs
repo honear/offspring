@@ -159,6 +159,8 @@ pub fn run() {
             commands::download_ffmpeg,
             commands::get_build_variant,
             commands::get_platform,
+            commands::pick_run_preset,
+            commands::pick_run_tool,
             commands::get_custom_last,
             commands::save_custom_last,
             commands::get_trim_last,
@@ -217,6 +219,15 @@ pub fn run() {
                     let settings = presets::load_settings().unwrap_or_default();
                     let _ = integration::sync_all(&ps, &settings);
                 }
+            }
+
+            // macOS Services integration. Registers our service provider
+            // with NSApp so the "Offspring…" entry in Finder's
+            // right-click → Services submenu dispatches into the app.
+            // Idempotent + main-thread-only; safe to call from setup().
+            #[cfg(target_os = "macos")]
+            {
+                integration::services_mac::register(&handle);
             }
 
             // Auto-download ffmpeg in the background when nothing is

@@ -39,6 +39,8 @@ pub mod context_menu;
 pub mod modern_menu;
 #[cfg(windows)]
 pub mod sendto;
+#[cfg(target_os = "macos")]
+pub mod services_mac;
 
 use anyhow::Result;
 

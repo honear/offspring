@@ -56,6 +56,15 @@ export const getBuildVariant = () => invoke<"standard" | "studio">("get_build_va
  *  conditionally hide platform-specific UI — e.g. NVIDIA NVENC
  *  toggle hidden on macOS, since Mac falls back to libx264 regardless. */
 export const getPlatform = () => invoke<"windows" | "macos" | "linux">("get_platform");
+
+/** macOS Services picker: run a chosen preset on the pasted files. */
+export const pickRunPreset = (files: string[], preset_id: string) =>
+  invoke<void>("pick_run_preset", { files, presetId: preset_id });
+
+/** macOS Services picker: open the chosen tool's dialog window on the pasted files.
+ *  `tool` is one of: "modify" | "trim" | "compare". */
+export const pickRunTool = (files: string[], tool: "modify" | "trim" | "compare") =>
+  invoke<void>("pick_run_tool", { files, tool });
 export const openDataFolder = () => invoke<void>("open_data_folder");
 /** Open `%LOCALAPPDATA%\Offspring` in Explorer with `debug.log`
  *  selected (or just the directory when the log doesn't exist yet). */
