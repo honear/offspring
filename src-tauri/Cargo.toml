@@ -1,7 +1,7 @@
 [package]
 name = "offspring"
-version = "0.4.3"
-description = "Offspring — right-click convert videos/images with FFmpeg"
+version = "0.4.4-b0008"
+description = "Offspring â€” right-click convert videos/images with FFmpeg"
 authors = ["Second March"]
 edition = "2021"
 repository = "https://github.com/second-march/offspring"
@@ -11,6 +11,29 @@ license = "MIT"
 [lib]
 name = "offspring_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
+
+# Build-variant feature flags.
+#
+#   (default) standard Offspring. Ships the in-app FFmpeg downloader,
+#             minisign-verified GitHub update checker, shell-extension
+#             cert import (certutil -> CurrentUser\TrustedPeople), and
+#             Add-AppxPackage registration for the Win11 modern menu.
+#
+#   studio    Offspring Studio. A cert-free, no-outbound-network build
+#             for users / admins who want the strictest possible
+#             behaviour profile. The HTTP modules (bootstrap.rs +
+#             updates.rs) and the cert/MSIX integration paths
+#             (modern_menu.rs) are compiled out entirely - the binary
+#             literally cannot talk to gyan.dev or github.com, and
+#             literally cannot import a certificate. Classic right-
+#             click menu still works (HKCU registry only). User
+#             obtains FFmpeg manually and points Settings at it.
+#
+# Build standard: `cargo build --release`
+# Build studio:   `cargo build --release --features studio`
+[features]
+default = []
+studio = []
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
@@ -24,7 +47,7 @@ tauri-plugin-dialog = "2"
 # offspring.exe spawn, so a multi-file selection actually fires N
 # separate processes. We hand-roll the singleton dance via Win32
 # named mutex + named pipe in `single_instance.rs` so secondaries
-# exit BEFORE Tauri/tao boot — `tauri-plugin-single-instance` checks
+# exit BEFORE Tauri/tao boot â€” `tauri-plugin-single-instance` checks
 # only after the runtime is up, which produced a brief flash of the
 # secondary's hidden message-pump window on screen. See `run()` in
 # lib.rs and `single_instance.rs`.

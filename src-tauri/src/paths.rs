@@ -1,16 +1,26 @@
 use anyhow::{Context, Result};
 use std::path::PathBuf;
 
+// Studio uses a distinct profile folder so the two variants can be
+// installed side-by-side without sharing presets, FFmpeg paths, or
+// logs. This matters because a studio user may have explicitly
+// pointed at a separate ffmpeg.exe path and doesn't want the
+// standard build clobbering it.
+#[cfg(not(feature = "studio"))]
+const PROFILE_DIR_NAME: &str = "Offspring";
+#[cfg(feature = "studio")]
+const PROFILE_DIR_NAME: &str = "Offspring Studio";
+
 pub fn data_dir() -> Result<PathBuf> {
     let mut p = dirs::data_dir().context("no APPDATA directory")?;
-    p.push("Offspring");
+    p.push(PROFILE_DIR_NAME);
     std::fs::create_dir_all(&p).ok();
     Ok(p)
 }
 
 pub fn local_data_dir() -> Result<PathBuf> {
     let mut p = dirs::data_local_dir().context("no LOCALAPPDATA directory")?;
-    p.push("Offspring");
+    p.push(PROFILE_DIR_NAME);
     std::fs::create_dir_all(&p).ok();
     Ok(p)
 }

@@ -69,13 +69,77 @@ network call is explicitly user-initiated. The complete list:
 |---|---|---|
 | When the user clicks **Settings → Check for updates** | `https://api.github.com/repos/second-march/offspring/releases/latest` | Update check. Failures surface as "couldn't reach the update server" only on the manual path. The request carries the running version in the `User-Agent` header for release-page traffic stats; no other identifying data. |
 | When the user clicks **Download** in the update banner that follows a successful check | GitHub-owned download host (one of `github.com`, `objects.githubusercontent.com`, `release-assets.githubusercontent.com`) | Downloads the installer .exe and its `.minisig` sidecar. Refuses to fetch from any other host. |
-| When the user clicks **Download FFmpeg** in Settings (or accepts the prompt on first install) | `https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip` and the matching `.sha256` sidecar | One-time FFmpeg fetch. After that, no further gyan.dev traffic. |
+| When the user clicks **Download FFmpeg** in Settings | `https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip` and the matching `.sha256` sidecar | One-time FFmpeg fetch. The installer **never** fetches FFmpeg automatically — the user opts in from inside the running app. After that, no further gyan.dev traffic. |
 
 That's the complete list. **No traffic at launch, no background
 pings, no scheduled checks**, no crash reports, no usage stats, no
 third-party SDKs, no remote config, no A/B tests. The in-app debug
 log lives only on the user's machine
 (`%LOCALAPPDATA%\Offspring\debug.log`) and is never uploaded.
+
+## Build variants: Offspring and Offspring Studio
+
+Each release ships two installers built from the same source tree:
+
+| | **Offspring** | **Offspring Studio** |
+|---|---|---|
+| Filename | `Offspring-Setup-X.Y.Z.exe` | `Offspring-Studio-Setup-X.Y.Z.exe` |
+| Binary name | `offspring.exe` | `offspring-studio.exe` |
+| Install path | `%LocalAppData%\Programs\Offspring` | `%LocalAppData%\Programs\Offspring Studio` |
+| Data folder | `%AppData%\Offspring` | `%AppData%\Offspring Studio` |
+| Classic right-click menu | Yes | Yes |
+| Win11 modern (top-level) right-click menu | Yes (default on) | **No** |
+| Self-signed cert in `CurrentUser\TrustedPeople` | Yes | **No, never** |
+| Shipped shell-extension DLL + MSIX packages | Yes | **No** |
+| Compile-time-included FFmpeg downloader | Yes (user-initiated) | **No (code compiled out)** |
+| Compile-time-included in-app updater | Yes (minisign-verified) | **No (code compiled out)** |
+
+Studio's "No" rows are not feature toggles. The Rust code is gated behind a Cargo feature flag (`studio`); building with `--features studio` *literally removes* the HTTP modules (`bootstrap.rs`, `updates.rs`) and the cert/MSIX integration paths (`modern_menu.rs`) from the compiled binary. The studio binary contains no code path that calls `gyan.dev`, `github.com`, or `certutil.exe`. The two variants can coexist on the same Windows account — separate AppIds, separate install dirs, separate data folders, separate registry namespaces.
+
+**Use Studio when:** you're in an enterprise environment that disallows arbitrary MSIX package registrations or third-party certificate trusts; you want auditable proof (read the source under `#[cfg(feature = "studio")]`) that the binary cannot reach the network for its own purposes; you'd rather check for updates manually on GitHub than have the app do it.
+
+**Use Standard when:** you want the Win11 top-level right-click menu, automatic FFmpeg setup, and minisign-verified in-app updates.
+
+### Runtime dependencies
+
+Both variants statically link the MSVC C runtime (`+crt-static` in `.cargo/config.toml`), so neither installer needs the VC++ Redistributable to be pre-installed on the user's machine. The .exe files contain no `vcruntime140.dll` / `vcruntime140_1.dll` / `msvcp140.dll` imports.
+
+Both variants render their UI through Microsoft Edge WebView2, which ships pre-installed on Windows 11 and on mid-2021+ Windows 10 builds. Variants differ in how they handle a missing runtime:
+
+- **Standard** bundles Microsoft's [Evergreen Bootstrapper](https://developer.microsoft.com/en-us/microsoft-edge/webview2/) (a ~1.7 MB Microsoft-signed binary) in the installer. The bootstrapper is only launched when `IsWebView2Installed` returns false (checked via the documented `HKLM\…\EdgeUpdate\Clients\{F3017226…}` / `HKCU\…` registry keys). On installs where WebView2 is already present — which is most of them — the bootstrapper never runs. When it does run, it's a Microsoft-signed binary contacting Microsoft's own update endpoints.
+- **Studio** detects the missing runtime in `InitializeSetup` and shows an info dialog pointing the user at Microsoft's WebView2 download page, then aborts the install. No network call is ever made by the Studio installer itself. The user installs WebView2 from Microsoft directly (one-time, ~15 seconds) and re-runs the Studio installer. This is the deliberate cost of Studio's "no automatic outbound network" promise being literally true.
+
+## Install scope and certificate trust
+
+Offspring installs **per-user** under `%LocalAppData%\Programs\Offspring`,
+the same scope used by VS Code, Discord, and Slack. The installer runs
+without admin rights — no UAC prompt, no machine-wide changes, no
+writes to `Program Files`, `HKLM`, or the `LocalMachine` certificate
+stores.
+
+The Windows 11 modern right-click menu is delivered as an MSIX sparse
+package. `Add-AppxPackage` requires the package's signing certificate
+to be present in `TrustedPeople`, so the installer imports our
+self-signed cert into the invoking user's `Cert:\CurrentUser\TrustedPeople`
+store. This grants signature trust **for that user only**, **for MSIX
+manifests / signed documents only** — it is *not* added to
+`Root`, `CA`, or any TLS path. It cannot be used by another machine to
+authenticate to yours, and it cannot vouch for HTTPS servers, code
+authenticode, or driver loading.
+
+The modern-menu component (cert + MSIX) is an opt-in checkbox during
+install, defaulting to ON. Unchecking it leaves the classic
+right-click menu in place, with no cert installed. Users who skipped
+it can opt in later from **Settings → Right-click menu → Set up
+Windows 11 modern menu…** with no admin prompt.
+
+Uninstalling removes the cert by FriendlyName + Subject match, so an
+unrelated cert sharing the same CN cannot be removed by accident.
+
+Releases prior to 0.4.4 installed per-machine and imported the cert
+into `LocalMachine\TrustedPeople`. The 0.4.4 installer detects that
+state and offers to uninstall the old version (one UAC prompt) before
+proceeding with the per-user install.
 
 ## What we already do
 

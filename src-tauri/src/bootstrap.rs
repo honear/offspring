@@ -4,21 +4,36 @@
 //! extracts it under `%LOCALAPPDATA%\Offspring\ffmpeg\`. Runs on a
 //! background thread, emitting `ffmpeg-download` progress events.
 //!
-//! This mirrors what `installer/scripts/download_ffmpeg.ps1` does at install
-//! time — keeping it in-app means the default NSIS installer works too, and
-//! users whose first install skipped the download can recover without having
-//! to re-run the Inno Setup installer.
+//! Sole path for the FFmpeg fetch — the installer used to do this via a
+//! `download_ffmpeg.ps1` script at install time, but that was removed in
+//! 0.4.4 to keep all outbound network calls explicitly user-initiated
+//! (per the SECURITY.md "no automatic outbound" promise) and to drop one
+//! more PowerShell-script-drop signature from sandbox scanners.
 
+// HTTP path is the entire module; only the studio stub at the bottom
+// stays compiled in the studio build. Imports gated accordingly so
+// `cargo build --features studio` doesn't trip "unused import"
+// warnings.
+#[cfg(not(feature = "studio"))]
 use anyhow::{anyhow, bail, Context, Result};
+#[cfg(not(feature = "studio"))]
 use serde::Serialize;
+#[cfg(not(feature = "studio"))]
 use sha2::{Digest, Sha256};
+#[cfg(not(feature = "studio"))]
 use std::io::{Read, Write};
+#[cfg(not(feature = "studio"))]
 use std::path::PathBuf;
+#[cfg(not(feature = "studio"))]
 use std::time::Duration;
-use tauri::{AppHandle, Emitter};
+use tauri::AppHandle;
+#[cfg(not(feature = "studio"))]
+use tauri::Emitter;
 
+#[cfg(not(feature = "studio"))]
 use crate::paths;
 
+#[cfg(not(feature = "studio"))]
 const FFMPEG_URL: &str = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip";
 /// gyan.dev publishes a SHA-256 sidecar next to every release ZIP. The
 /// app downloads both, computes the hash of the ZIP, and refuses to
@@ -27,8 +42,10 @@ const FFMPEG_URL: &str = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-esse
 /// defeat partial-compromise / cache-poisoning scenarios where one
 /// URL gets tampered with and not the other, and it catches transport-
 /// or storage-level corruption.
+#[cfg(not(feature = "studio"))]
 const FFMPEG_SHA256_URL: &str = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip.sha256";
 
+#[cfg(not(feature = "studio"))]
 #[derive(Serialize, Clone, Debug)]
 pub struct DownloadEvent {
     /// "downloading" | "extracting" | "done" | "error"
@@ -39,6 +56,7 @@ pub struct DownloadEvent {
     pub message: Option<String>,
 }
 
+#[cfg(not(feature = "studio"))]
 fn emit(app: &AppHandle, ev: DownloadEvent) {
     let _ = app.emit("ffmpeg-download", ev);
 }
@@ -46,6 +64,7 @@ fn emit(app: &AppHandle, ev: DownloadEvent) {
 /// Run the full download → extract → install pipeline on a background
 /// thread. Returns immediately; observe progress via `ffmpeg-download`
 /// events.
+#[cfg(not(feature = "studio"))]
 pub fn spawn_download(app: AppHandle) {
     std::thread::spawn(move || {
         let result = download_and_install(&app);
@@ -70,6 +89,7 @@ pub fn spawn_download(app: AppHandle) {
     });
 }
 
+#[cfg(not(feature = "studio"))]
 fn download_and_install(app: &AppHandle) -> Result<PathBuf> {
     let target = paths::local_data_dir()?.join("ffmpeg");
     let bin_exe = target.join("bin").join("ffmpeg.exe");
@@ -240,6 +260,7 @@ fn download_and_install(app: &AppHandle) -> Result<PathBuf> {
     Ok(bin_exe)
 }
 
+#[cfg(not(feature = "studio"))]
 fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> Result<()> {
     std::fs::create_dir_all(dst)?;
     for entry in std::fs::read_dir(src)? {
@@ -258,6 +279,7 @@ fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> Result<()
 /// Lowercase hex of a digest. Standalone instead of pulling in the
 /// `hex` crate just for this — the loop is straightforward and the
 /// result is only used for a constant-time string comparison.
+#[cfg(not(feature = "studio"))]
 fn hex_lower(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut s = String::with_capacity(bytes.len() * 2);
@@ -271,6 +293,7 @@ fn hex_lower(bytes: &[u8]) -> String {
 /// Constant-time byte-slice equality. Avoids leaking timing information
 /// during hash comparison — almost certainly overkill against a remote
 /// attacker, but cheap enough that we may as well not skip it.
+#[cfg(not(feature = "studio"))]
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;
@@ -288,6 +311,7 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 /// style). All of those have the same first token, so a regex-light
 /// scan is enough. We tolerate trailing junk but reject the response if
 /// no 64-hex run is present (HTML 5xx pages, redirects, blank).
+#[cfg(not(feature = "studio"))]
 fn fetch_expected_sha256() -> Result<String> {
     let agent = ureq::AgentBuilder::new()
         .timeout_connect(Duration::from_secs(20))
@@ -311,7 +335,7 @@ fn fetch_expected_sha256() -> Result<String> {
     ))
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "studio")))]
 mod tests {
     use super::*;
 
@@ -328,4 +352,23 @@ mod tests {
         assert!(!constant_time_eq(b"abc", b"abcd"));
         assert!(constant_time_eq(b"", b""));
     }
+}
+
+// ----- studio build: spawn_download is a no-op error path ----------
+//
+// Keeping the function signature lets `commands::download_ffmpeg`
+// stay variant-agnostic. The studio build's frontend won't show the
+// "Download FFmpeg" button (the variant is exposed via
+// `commands::get_build_variant`), so this stub is defense-in-depth.
+#[cfg(feature = "studio")]
+pub fn spawn_download(app: AppHandle) {
+    use tauri::Emitter;
+    let _ = app.emit(
+        "ffmpeg-download",
+        serde_json::json!({
+            "phase": "error",
+            "percent": null,
+            "message": "Offspring Studio does not include the FFmpeg downloader. Install ffmpeg.exe manually and set its path in Settings."
+        }),
+    );
 }

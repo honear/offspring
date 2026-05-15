@@ -2,7 +2,7 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "Capabilities for Offspring windows",
-  "windows": ["main", "custom", "progress", "trim", "modify"],
+  "windows": ["main", "custom", "progress", "trim", "modify", "compare-grid"],
   "permissions": [
     "core:default",
     "core:event:allow-listen",

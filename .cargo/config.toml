@@ -1,0 +1,21 @@
+# Statically link the MSVC C runtime so the resulting .exe doesn't
+# depend on vcruntime140.dll / vcruntime140_1.dll / msvcp140.dll being
+# installed on the user's machine via VC++ Redistributable.
+#
+# Why: a fresh Windows install (Sandbox, VM snapshot, OOBE without
+# updates pulled) doesn't ship VCRedist. The default dynamic-CRT
+# linkage produces an offspring.exe that fails at process-start with
+# "VCRUNTIME140.dll was not found". This is the standard "ship a
+# single .exe that just works" pattern for Rust on Windows.
+#
+# Cost: ~700 KB per binary (the C runtime gets statically embedded).
+# Applies to both the standard and studio variants (Cargo merges this
+# config across feature flags), and also to the shell-extension DLL
+# in shell-ext/ when cargo is invoked from anywhere in this tree.
+#
+# Cargo searches `.cargo/config.toml` upward from the invocation
+# directory — placing it at the repo root means every cargo call
+# (src-tauri/, shell-ext/, anywhere) picks it up.
+
+[target.'cfg(target_env = "msvc")']
+rustflags = ["-C", "target-feature=+crt-static"]

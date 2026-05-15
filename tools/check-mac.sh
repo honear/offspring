@@ -1,8 +1,12 @@
 #!/usr/bin/env bash
 # One-shot macOS sanity check.
 #
-# Run this on your Mac inside the repo root after `git pull`:
-#   chmod +x tools/check-mac.sh && tools/check-mac.sh 2>&1 | tee mac-check.log
+# Run from anywhere — script auto-locates the repo root relative to
+# its own path:
+#   chmod +x tools/check-mac.sh
+#   tools/check-mac.sh 2>&1 | tee mac-check.log
+#   # or, with absolute path from anywhere:
+#   ~/whatever/offspring/tools/check-mac.sh 2>&1 | tee /tmp/mac-check.log
 #
 # Pipe the whole output back into the Claude conversation on your PC.
 # It tells me exactly which #[cfg(windows)] gates are missing, whether
@@ -11,6 +15,27 @@
 
 set -uo pipefail   # NOT `set -e` — we want each section to report
                    # independently even if an earlier one fails
+
+# Resolve repo root from this script's own location, regardless of
+# where the user invoked it from. Follows symlinks so `tools/check-mac.sh`
+# works even if the script is symlinked elsewhere on the user's PATH.
+SCRIPT_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
+while [ -L "$SCRIPT_PATH" ]; do
+    SCRIPT_PATH="$(readlink "$SCRIPT_PATH")"
+done
+REPO_ROOT="$(cd "$(dirname "$SCRIPT_PATH")/.." && pwd)"
+
+if [ ! -f "$REPO_ROOT/src-tauri/Cargo.toml" ]; then
+    echo "ERROR: src-tauri/Cargo.toml not found under $REPO_ROOT"
+    echo "       The script located itself at $SCRIPT_PATH"
+    echo "       but the parent directory doesn't look like the Offspring repo."
+    echo "       Are you running this from a clone that's missing files?"
+    exit 1
+fi
+
+cd "$REPO_ROOT"
+echo "(repo root: $REPO_ROOT)"
+echo ""
 
 echo "============================================================"
 echo " Offspring macOS sanity check"

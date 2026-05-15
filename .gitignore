@@ -18,6 +18,16 @@ vite.config.ts.timestamp-*
 /installer/msix/stage/
 /installer/msix/.cert/
 
+# Studio cargo target dir - build-release.ps1 directs the studio
+# build pass here so the standard target dir isn't clobbered.
+/target-studio/
+
+# Microsoft-owned WebView2 Evergreen Bootstrapper. We redistribute
+# it via the standard installer (Microsoft's terms allow this) but
+# it doesn't belong in our git history. build-release.ps1 ensures
+# it's present and downloads if missing; see RELEASING.md.
+/installer/MicrosoftEdgeWebView2Setup.exe
+
 *.pfx
 *.p12
 *.key
@@ -26,6 +36,7 @@ vite.config.ts.timestamp-*
 /DESIGN.md
 /.claude/
 /examples/
+/OPERATIONS.md
 
 # Minisign signing material. The private key must never enter the repo
 # under any circumstances — losing it would let an attacker impersonate

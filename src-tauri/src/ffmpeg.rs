@@ -4,6 +4,9 @@ use std::ffi::OsString;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::OnceLock;
+use std::time::{Duration, Instant};
 
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
@@ -143,22 +146,71 @@ fn hide_console(cmd: &mut Command) -> &mut Command {
     cmd
 }
 
+/// Resolve which `ffmpeg.exe` to invoke for this encode session.
+///
+/// Order of precedence:
+///   1. **Explicit user override** from `settings.ffmpeg_path`. If
+///      this is set to anything non-empty, IT WINS — and if it's
+///      invalid we surface a hard error instead of silently falling
+///      through. Falling back would re-introduce the exact bug a
+///      user is trying to fix by setting the override (e.g. ImageMagick's
+///      bundled `ffmpeg.exe` getting picked up off PATH and shadowing
+///      the build the user actually wants).
+///   2. **Managed bundled FFmpeg** at
+///      `%LOCALAPPDATA%\Offspring\ffmpeg\bin\ffmpeg.exe` — what the
+///      first-run download writes into.
+///   3. **PATH lookup** for `ffmpeg.exe` as a last resort. Works for
+///      developers with a system FFmpeg, BUT can land on a stripped-
+///      down build from another app (ImageMagick, OBS, etc.) that's
+///      missing filters Offspring needs. That's why the explicit-
+///      override path is offered in Settings — and why we don't fall
+///      back to PATH when the user has chosen a specific path.
+///
+/// Validation for the explicit-override path:
+///   * Must point at a regular file (not a directory).
+///   * Filename must be `ffmpeg.exe` (case-insensitive). Custom builds
+///     renamed to `ffmpeg-static.exe` etc. fall out — rare in practice,
+///     and a clear error here is better than a confusing subprocess
+///     failure later when the binary doesn't accept ffmpeg flags.
 pub fn resolve_ffmpeg(settings: &Settings) -> Result<PathBuf> {
-    if let Some(ref s) = settings.ffmpeg_path {
-        let p = PathBuf::from(s);
-        if p.exists() {
+    if let Some(ref configured) = settings.ffmpeg_path {
+        let trimmed = configured.trim();
+        if !trimmed.is_empty() {
+            let p = PathBuf::from(trimmed);
+            if !p.is_file() {
+                bail!(
+                    "The FFmpeg path you set in Settings doesn't point at a file: \
+                     {} — clear the path to use the bundled FFmpeg, or pick the \
+                     real ffmpeg.exe.",
+                    p.display()
+                );
+            }
+            let is_ffmpeg_exe = p
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map(|s| s.eq_ignore_ascii_case("ffmpeg.exe"))
+                .unwrap_or(false);
+            if !is_ffmpeg_exe {
+                bail!(
+                    "The FFmpeg path you set in Settings isn't named ffmpeg.exe: \
+                     {} — pick the actual ffmpeg.exe file, or clear the path to \
+                     use the bundled FFmpeg.",
+                    p.display()
+                );
+            }
             return Ok(p);
         }
+        // Empty / whitespace-only string is treated the same as None —
+        // the user has indicated "use the default" by clearing the field.
     }
     let managed = paths::ffmpeg_managed_path()?;
-    if managed.exists() {
+    if managed.is_file() {
         return Ok(managed);
     }
-    // Fall back to PATH lookup
     if let Some(p) = which("ffmpeg") {
         return Ok(p);
     }
-    bail!("ffmpeg.exe not found. Install via app settings or add to PATH.")
+    bail!("ffmpeg.exe not found. Click \"Download FFmpeg\" in Settings, or point Offspring at an existing ffmpeg.exe.")
 }
 
 fn which(name: &str) -> Option<PathBuf> {
@@ -775,10 +827,47 @@ pub fn encode_file(
 
             let mut cmd = Command::new(ffmpeg);
             cmd.args(["-v", &verbosity, "-y", "-hide_banner"]);
+            // Modify-tool trim: insert `-ss <start> -to <end>` BEFORE
+            // -i so ffmpeg input-seeks and stops decoding at `end`.
+            // Much cheaper than filter-based `trim=` (which would
+            // decode the whole clip and discard frames after the
+            // fact). Only emitted when the input is a real file
+            // (sequences don't support seek the same way).
+            if matches!(input, EncodeInput::File(_)) {
+                if let Some(s) = preset.modify_trim_start_sec {
+                    cmd.args(["-ss", &format!("{:.3}", s)]);
+                }
+                if let Some(e) = preset.modify_trim_end_sec {
+                    cmd.args(["-to", &format!("{:.3}", e)]);
+                }
+            }
             for a in input.input_args() {
                 cmd.arg(a);
             }
-            if !filter.is_empty() {
+            // Watermark vs. simple -vf path. When the Overlay tool's
+            // watermark step is active, swap to -filter_complex so we
+            // can pull the PNG in as a second input and composite it
+            // on top of the user's normal filter chain. Otherwise the
+            // single-input -vf path is identical to what it was before.
+            if let Some(ref wm) = preset.watermark {
+                cmd.args(["-i", &wm.path]);
+                let inner = if filter.is_empty() { "null".to_string() } else { filter.clone() };
+                let complex = format!(
+                    "[1:v]scale={w}:{h}:flags=lanczos,format=rgba,colorchannelmixer=aa={op:.3}[wm];\
+                     [0:v]{inner}[vid];\
+                     [vid][wm]overlay=0:0[out]",
+                    w = wm.clip_w,
+                    h = wm.clip_h,
+                    op = wm.opacity,
+                    inner = inner
+                );
+                cmd.args(["-filter_complex", &complex]);
+                cmd.args(["-map", "[out]"]);
+                // Keep the main input's audio stream if present. The `?`
+                // makes the map optional, so a silent clip (no audio
+                // stream) doesn't fail the encode.
+                cmd.args(["-map", "0:a?"]);
+            } else if !filter.is_empty() {
                 cmd.args(["-vf", &filter]);
             }
             cmd.args(["-c:v", codec, "-preset", &preset_speed]);
@@ -826,7 +915,7 @@ pub fn encode_file(
                 cmd.arg("-an");
             }
             cmd.args(["-progress", "pipe:1"]).arg(&out);
-            run_with_progress(cmd, duration_s, file_index, total_files, &input_display, "encode", &mut on_progress)?;
+            run_with_progress_cleanup(cmd, duration_s, file_index, total_files, &input_display, "encode", &out, &mut on_progress)?;
         }
         Format::Image => {
             // Image preset on a non-image input is almost always user
@@ -873,7 +962,25 @@ pub fn encode_file(
             for a in input.input_args() {
                 cmd.arg(a);
             }
-            if !filter.is_empty() {
+            // Same watermark vs -vf branching as the MP4 path — see
+            // the long comment above. The Image branch never has an
+            // audio stream to map, so the trailing `-map 0:a?` is
+            // omitted here.
+            if let Some(ref wm) = preset.watermark {
+                cmd.args(["-i", &wm.path]);
+                let inner = if filter.is_empty() { "null".to_string() } else { filter.clone() };
+                let complex = format!(
+                    "[1:v]scale={w}:{h}:flags=lanczos,format=rgba,colorchannelmixer=aa={op:.3}[wm];\
+                     [0:v]{inner}[vid];\
+                     [vid][wm]overlay=0:0[out]",
+                    w = wm.clip_w,
+                    h = wm.clip_h,
+                    op = wm.opacity,
+                    inner = inner
+                );
+                cmd.args(["-filter_complex", &complex]);
+                cmd.args(["-map", "[out]"]);
+            } else if !filter.is_empty() {
                 cmd.args(["-vf", &filter]);
             }
             // -frames:v 1 caps the output to a single frame. Belt-and-
@@ -952,17 +1059,17 @@ pub fn encode_file(
             cmd.arg(&out);
             // run_with_progress is overkill for a one-frame encode
             // (no `out_time_ms` to scrub against), but it gives us
-            // consistent error handling and process spawning. The
-            // progress bar will jump from "encoding" straight to
-            // "done" without intermediate ticks, which is fine for
-            // sub-second encodes.
-            run_with_progress(
+            // consistent error handling + cancellation. The progress
+            // bar will jump from "encoding" straight to "done" without
+            // intermediate ticks, which is fine for sub-second encodes.
+            run_with_progress_cleanup(
                 cmd,
                 None,
                 file_index,
                 total_files,
                 &input_display,
                 "encode",
+                &out,
                 &mut on_progress,
             )?;
         }
@@ -980,6 +1087,74 @@ pub fn encode_file(
     Ok(out)
 }
 
+/// Watchdog timeout for `run_with_progress`. If ffmpeg goes this long
+/// without emitting a new line on its `-progress pipe:1` stdout, we
+/// assume it's stalled (e.g. infinite filter-source feeding into a
+/// stack filter that never EOFs) and kill the process.
+///
+/// 90s is generous: ffmpeg's `-progress` cadence is once per second
+/// in normal operation, so even on a heavily-throttled CPU or a very
+/// slow encoder we'd expect lines every few seconds at worst. A
+/// 90s gap is a clear signal of "hung", not "slow".
+const FFMPEG_STALL_TIMEOUT: Duration = Duration::from_secs(90);
+
+/// How often `run_with_progress` wakes up between received lines to
+/// check for cancellation + stall. 1s is fine-grained enough that a
+/// user clicking "cancel" sees the ffmpeg child die within a second,
+/// without burning measurable CPU on the polling itself.
+const FFMPEG_POLL_INTERVAL: Duration = Duration::from_secs(1);
+
+/// Process-wide encode-cancel flag. Set by `request_cancel()` (called
+/// from the `cancel_encode` Tauri command when the user clicks ✕ on
+/// the progress window) and cleared by `reset_cancel()` at the top of
+/// every encode entrypoint. `run_with_progress` polls it once per
+/// second and kills the ffmpeg child + bails when it sees `true`.
+///
+/// Singleton (rather than threaded through every encode function) for
+/// two reasons:
+///   1. Only one encode is in flight at a time in practice — the
+///      progress window is modal-ish and starts the encode on dialog
+///      close, no parallel jobs from the same UI.
+///   2. The encode functions live deep inside `ffmpeg.rs` and don't
+///      have access to Tauri state; threading an `Arc<AtomicBool>`
+///      through ~14 call sites is a lot of plumbing for no real
+///      benefit over a static.
+static CANCEL: OnceLock<AtomicBool> = OnceLock::new();
+
+fn cancel_flag() -> &'static AtomicBool {
+    CANCEL.get_or_init(|| AtomicBool::new(false))
+}
+
+/// Request that any in-flight ffmpeg encode abort ASAP. Exposed to
+/// Tauri via `commands::cancel_encode`.
+pub fn request_cancel() {
+    cancel_flag().store(true, Ordering::SeqCst);
+}
+
+/// Clear the cancel flag. Called at the top of every encode-command
+/// entrypoint so a previous cancellation doesn't immediately abort
+/// the new job.
+pub fn reset_cancel() {
+    cancel_flag().store(false, Ordering::SeqCst);
+}
+
+pub fn is_cancelled() -> bool {
+    cancel_flag().load(Ordering::SeqCst)
+}
+
+/// Best-effort delete of a partial / invalid output file. No-op if
+/// the file doesn't exist or the delete fails (e.g. another process
+/// still has it open). Called from encode entrypoints when
+/// `run_with_progress` returns an error — covers user cancellation,
+/// the stall watchdog, and any ffmpeg-internal failure that left a
+/// truncated file on disk (a partial MP4 without its moov atom is
+/// just confusing junk; deleting is friendlier than leaving it).
+pub fn cleanup_partial_output(out: &Path) {
+    if out.exists() {
+        let _ = std::fs::remove_file(out);
+    }
+}
+
 fn run_with_progress(
     mut cmd: Command,
     duration_s: Option<f64>,
@@ -989,34 +1164,191 @@ fn run_with_progress(
     stage: &str,
     on_progress: &mut impl FnMut(ProgressEvent),
 ) -> Result<()> {
-    cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
+    // Capture stderr (was Stdio::null()) so that when ffmpeg fails we
+    // can include the actual error in the bail!() message. Without
+    // this the user sees a bare exit code like "0xdfaba7bb" and we
+    // have nothing to diagnose with. A background thread drains the
+    // pipe so it doesn't fill up and block ffmpeg's writes.
+    cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
     hide_console(&mut cmd);
     let mut child = cmd.spawn().context("spawning ffmpeg")?;
     let stdout = child.stdout.take().ok_or_else(|| anyhow!("no stdout"))?;
-    let reader = BufReader::new(stdout);
+    let stderr = child.stderr.take().ok_or_else(|| anyhow!("no stderr"))?;
 
-    for line in reader.lines().map_while(|l| l.ok()) {
-        if let Some(rest) = line.strip_prefix("out_time_ms=") {
-            if let (Ok(us), Some(total)) = (rest.trim().parse::<i64>(), duration_s) {
-                let s = us as f64 / 1_000_000.0;
-                let pct = (s / total).clamp(0.0, 1.0) as f32;
-                on_progress(ProgressEvent {
-                    file_index,
-                    total_files,
-                    input: input_display.to_string(),
-                    stage: stage.into(),
-                    percent: Some(pct),
-                    message: None,
-                });
+    let stderr_thread = std::thread::spawn(move || {
+        BufReader::new(stderr)
+            .lines()
+            .map_while(|l| l.ok())
+            .collect::<Vec<String>>()
+    });
+
+    // Spawn the stdout reader on its own thread, piping lines through a
+    // channel. That lets the main thread `recv_timeout` for the stall
+    // watchdog — if ffmpeg goes silent we can detect it and kill the
+    // child, rather than blocking forever on `reader.lines()`.
+    //
+    // The channel auto-disconnects when the reader thread finishes
+    // (ffmpeg closed its stdout / exited cleanly), which is how we
+    // distinguish "graceful end of output" from "stalled".
+    let (tx, rx) = std::sync::mpsc::channel::<String>();
+    let stdout_thread = std::thread::spawn(move || {
+        for line in BufReader::new(stdout).lines().map_while(|l| l.ok()) {
+            if tx.send(line).is_err() {
+                // Receiver dropped (main thread bailed) — stop reading.
+                break;
             }
+        }
+    });
+
+    // The main loop polls `rx` once per `FFMPEG_POLL_INTERVAL` (1s).
+    // Each iteration we either get a line (progress / log noise), hit
+    // a poll-tick timeout (check cancel + stall), or see the channel
+    // disconnect (child exited and reader thread finished).
+    //
+    // Cancel and stall are decoupled: the stall counter resets on
+    // every received line, so a slow-but-still-progressing encode
+    // never trips it. Cancel checks every tick regardless.
+    let mut stalled = false;
+    let mut cancelled = false;
+    let mut last_progress = Instant::now();
+    loop {
+        match rx.recv_timeout(FFMPEG_POLL_INTERVAL) {
+            Ok(line) => {
+                last_progress = Instant::now();
+                if let Some(rest) = line.strip_prefix("out_time_ms=") {
+                    if let (Ok(us), Some(total)) = (rest.trim().parse::<i64>(), duration_s) {
+                        let s = us as f64 / 1_000_000.0;
+                        let pct = (s / total).clamp(0.0, 1.0) as f32;
+                        on_progress(ProgressEvent {
+                            file_index,
+                            total_files,
+                            input: input_display.to_string(),
+                            stage: stage.into(),
+                            percent: Some(pct),
+                            message: None,
+                        });
+                    }
+                }
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                // User cancelled — kill the child IMMEDIATELY. We
+                // don't wait for it to gracefully shut down; ffmpeg
+                // doesn't really do graceful interrupt anyway, and
+                // any partial output is going to be cleaned up by
+                // the caller via `cleanup_partial_output`.
+                if is_cancelled() {
+                    let _ = child.kill();
+                    cancelled = true;
+                    break;
+                }
+                // No output for FFMPEG_STALL_TIMEOUT → stalled.
+                // Verify the child is still alive before declaring
+                // a stall (narrow race: could have exited just as
+                // the timeout fired and we haven't reaped it yet).
+                if last_progress.elapsed() > FFMPEG_STALL_TIMEOUT {
+                    match child.try_wait() {
+                        Ok(Some(_)) => break,           // already exited; fall through
+                        Ok(None) => {                    // still running, no output → hung
+                            let _ = child.kill();
+                            stalled = true;
+                            break;
+                        }
+                        Err(_) => break,                 // can't query; treat as exited
+                    }
+                }
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
         }
     }
 
+    let _ = stdout_thread.join();
     let status = child.wait()?;
+    let stderr_lines = stderr_thread.join().unwrap_or_default();
+
+    if cancelled {
+        // User asked to abort. Specific error message so callers know
+        // this was an intentional cancel (vs. a real failure) — useful
+        // for surfacing a different UI state ("Cancelled" rather than
+        // "Failed with errors"). The caller is expected to delete the
+        // partial output file via `cleanup_partial_output`.
+        bail!("Encode cancelled.");
+    }
+
+    if stalled {
+        // Watchdog killed it. Surface the stall plus whatever stderr
+        // existed up to that point — sometimes ffmpeg complains
+        // verbosely before going silent (e.g. "filter graph: input
+        // pad not connected") and the tail still helps.
+        let tail = stderr_lines
+            .iter()
+            .rev()
+            .take(15)
+            .rev()
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n");
+        let summary = if tail.is_empty() {
+            "(no stderr before stall)".to_string()
+        } else {
+            tail
+        };
+        bail!(
+            "ffmpeg stalled — no progress for {}s, killed by watchdog\n--- last stderr lines ---\n{}",
+            FFMPEG_STALL_TIMEOUT.as_secs(),
+            summary
+        );
+    }
+
     if !status.success() {
-        bail!("ffmpeg exited with status {status}");
+        // Show the last ~15 lines of stderr in the error — that's
+        // usually where ffmpeg prints the actual reason (filter graph
+        // parse error, missing codec, etc.). Earlier lines are mostly
+        // banner / probe noise. Falls back to a placeholder if stderr
+        // was empty (rare; means ffmpeg crashed before writing anything).
+        let tail = stderr_lines
+            .iter()
+            .rev()
+            .take(15)
+            .rev()
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n");
+        let summary = if tail.is_empty() {
+            "(no stderr captured)".to_string()
+        } else {
+            tail
+        };
+        bail!("ffmpeg exited with status {status}\n--- last stderr lines ---\n{summary}");
     }
     Ok(())
+}
+
+/// `run_with_progress` plus best-effort cleanup of `out` on any error.
+/// The cleanup covers three cases — user cancellation, stall watchdog
+/// kill, and any ffmpeg-internal failure that left a truncated file on
+/// disk. Callers that write to a specific output path should use this
+/// wrapper instead of bare `run_with_progress` so an aborted encode
+/// doesn't leave a partial / invalid file behind.
+#[allow(clippy::too_many_arguments)]
+fn run_with_progress_cleanup(
+    cmd: Command,
+    duration_s: Option<f64>,
+    file_index: usize,
+    total_files: usize,
+    input_display: &str,
+    stage: &str,
+    out: &Path,
+    on_progress: &mut impl FnMut(ProgressEvent),
+) -> Result<()> {
+    match run_with_progress(
+        cmd, duration_s, file_index, total_files, input_display, stage, on_progress,
+    ) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            cleanup_partial_output(out);
+            Err(e)
+        }
+    }
 }
 
 /// One GIF encode pass (palettegen + paletteuse). `width_override` lets the
@@ -1114,6 +1446,18 @@ fn encode_gif_once(
 
     let mut palette_cmd = Command::new(ffmpeg);
     palette_cmd.args(["-v", verbosity, "-y"]);
+    // Modify-tool trim. See the MP4 branch in encode_file for the
+    // long-form comment. The palette pass needs the same -ss/-to as
+    // the encode pass so palette generation samples the trimmed
+    // range, not the full clip.
+    if matches!(input, EncodeInput::File(_)) {
+        if let Some(s) = preset.modify_trim_start_sec {
+            palette_cmd.args(["-ss", &format!("{:.3}", s)]);
+        }
+        if let Some(e) = preset.modify_trim_end_sec {
+            palette_cmd.args(["-to", &format!("{:.3}", e)]);
+        }
+    }
     for a in input.input_args() {
         palette_cmd.arg(a);
     }
@@ -1163,6 +1507,16 @@ fn encode_gif_once(
 
     let mut cmd = Command::new(ffmpeg);
     cmd.args(["-v", verbosity, "-y", "-hide_banner"]);
+    // Same Modify-trim input-seek pair as the palette pass above —
+    // must match so both passes see the same frames.
+    if matches!(input, EncodeInput::File(_)) {
+        if let Some(s) = preset.modify_trim_start_sec {
+            cmd.args(["-ss", &format!("{:.3}", s)]);
+        }
+        if let Some(e) = preset.modify_trim_end_sec {
+            cmd.args(["-to", &format!("{:.3}", e)]);
+        }
+    }
     for a in input.input_args() {
         cmd.arg(a);
     }
@@ -1171,13 +1525,14 @@ fn encode_gif_once(
         .args(["-filter_complex", &filter_complex])
         .args(["-progress", "pipe:1"])
         .arg(out);
-    run_with_progress(
+    run_with_progress_cleanup(
         cmd,
         duration_s,
         file_index,
         total_files,
         &input_display,
         "encode",
+        out,
         on_progress,
     )?;
 
@@ -1403,7 +1758,7 @@ pub fn encode_merge_filter(
     cmd.args(["-progress", "pipe:1"]).arg(output);
 
     let input_display = format!("merge: {} files", n);
-    run_with_progress(cmd, duration_s, 1, 1, &input_display, "encode", &mut on_progress)?;
+    run_with_progress_cleanup(cmd, duration_s, 1, 1, &input_display, "encode", output, &mut on_progress)?;
 
     on_progress(ProgressEvent {
         file_index: 1,
@@ -1474,6 +1829,9 @@ pub fn derive_merge_preset(ffmpeg: &Path, first: &Path) -> Preset {
         modify_overwrite: None,
         modify_remove_audio: None,
         modify_rotate: None,
+        modify_trim_start_sec: None,
+        modify_trim_end_sec: None,
+        watermark: None,
         icon: None,
         order: 0,
     }
@@ -1549,6 +1907,9 @@ pub fn derive_grayscale_preset(ffmpeg: &Path, input: &Path) -> Preset {
             modify_overwrite: None,
             modify_remove_audio: None,
             modify_rotate: None,
+            modify_trim_start_sec: None,
+            modify_trim_end_sec: None,
+            watermark: None,
             icon: None,
             order: 0,
         };
@@ -1590,6 +1951,9 @@ pub fn derive_grayscale_preset(ffmpeg: &Path, input: &Path) -> Preset {
         modify_overwrite: None,
         modify_remove_audio: None,
         modify_rotate: None,
+        modify_trim_start_sec: None,
+        modify_trim_end_sec: None,
+        watermark: None,
         icon: None,
         order: 0,
     }
@@ -1604,13 +1968,38 @@ pub fn derive_grayscale_preset(ffmpeg: &Path, input: &Path) -> Preset {
 /// burns into a still image of the same type rather than an
 /// unexpected video clip.
 pub fn derive_overlay_preset(ffmpeg: &Path, input: &Path, cfg: OverlayConfig) -> Preset {
-    use crate::presets::{Dither, Format, ImageCodec};
+    use crate::presets::{Dither, Format, ImageCodec, WatermarkSpec};
 
     let ext = input
         .extension()
         .and_then(|e| e.to_str())
         .unwrap_or("mp4")
         .to_ascii_lowercase();
+
+    // Build the per-encode WatermarkSpec once and reuse for both
+    // branches. Empty when the user hasn't enabled the toggle, hasn't
+    // picked a path, or the picked file doesn't exist on disk —
+    // failing silently here would be the wrong call (the user
+    // explicitly asked for a watermark), so we'd rather not produce
+    // a Spec than produce one pointing at nothing. The encode
+    // dispatcher logs a clear error if a Spec is present and the
+    // path goes missing between probe + invoke.
+    let watermark = if cfg.watermark_enabled && !cfg.watermark_path.trim().is_empty() {
+        let path = cfg.watermark_path.trim();
+        if std::path::Path::new(path).is_file() {
+            let (w, h) = probe_dimensions(ffmpeg, input).unwrap_or((1920, 1080));
+            Some(WatermarkSpec {
+                path: path.to_string(),
+                opacity: cfg.watermark_opacity.clamp(0.0, 1.0),
+                clip_w: w,
+                clip_h: h,
+            })
+        } else {
+            None
+        }
+    } else {
+        None
+    };
 
     if is_image_path(input) {
         let codec = match ext.as_str() {
@@ -1652,6 +2041,9 @@ pub fn derive_overlay_preset(ffmpeg: &Path, input: &Path, cfg: OverlayConfig) ->
             modify_overwrite: None,
             modify_remove_audio: None,
             modify_rotate: None,
+            modify_trim_start_sec: None,
+            modify_trim_end_sec: None,
+            watermark: watermark.clone(),
             icon: None,
             order: 0,
         };
@@ -1693,6 +2085,9 @@ pub fn derive_overlay_preset(ffmpeg: &Path, input: &Path, cfg: OverlayConfig) ->
         modify_overwrite: None,
         modify_remove_audio: None,
         modify_rotate: None,
+        modify_trim_start_sec: None,
+        modify_trim_end_sec: None,
+        watermark: watermark.clone(),
         icon: None,
         order: 0,
     }
@@ -2070,13 +2465,14 @@ pub fn encode_trim_files(
             cmd.args(["-filter_complex", &p2])
                 .args(["-progress", "pipe:1"])
                 .arg(&out);
-            run_with_progress(
+            run_with_progress_cleanup(
                 cmd,
                 Some(kept_duration_s),
                 file_index,
                 total,
                 &input_display,
                 "encode",
+                &out,
                 &mut on_progress,
             )?;
         } else {
@@ -2136,13 +2532,14 @@ pub fn encode_trim_files(
                 cmd.arg("-an");
             }
             cmd.args(["-progress", "pipe:1"]).arg(&out);
-            run_with_progress(
+            run_with_progress_cleanup(
                 cmd,
                 Some(kept_duration_s),
                 file_index,
                 total,
                 &input_display,
                 "encode",
+                &out,
                 &mut on_progress,
             )?;
         }
@@ -2317,13 +2714,14 @@ pub fn encode_compare_files(
             .args(["-progress", "pipe:1"])
             .args(["-shortest"])
             .arg(&out);
-        run_with_progress(
+        run_with_progress_cleanup(
             cmd,
             duration_opt,
             file_index,
             total_files,
             &input_display,
             "encode",
+            &out,
             &mut on_progress,
         )?;
     } else {
@@ -2350,13 +2748,14 @@ pub fn encode_compare_files(
             .args(["-shortest"])
             .args(["-progress", "pipe:1"])
             .arg(&out);
-        run_with_progress(
+        run_with_progress_cleanup(
             cmd,
             duration_opt,
             file_index,
             total_files,
             &input_display,
             "encode",
+            &out,
             &mut on_progress,
         )?;
     }
@@ -2364,6 +2763,406 @@ pub fn encode_compare_files(
     on_progress(ProgressEvent {
         file_index,
         total_files,
+        input: input_display,
+        stage: "done".into(),
+        percent: Some(1.0),
+        message: Some(out.display().to_string()),
+    });
+    Ok(out)
+}
+
+/// Two layout modes for `encode_compare_grid_files`.
+///
+///   * **Grid** — uniform cells inheriting the first clip's aspect.
+///     Each input is letterboxed / pillarboxed inside its cell.
+///     Empty trailing slots filled with black. Looks like a regular
+///     contact sheet.
+///   * **Mosaic** — masonry packing. Column width is fixed, but each
+///     clip retains its native aspect at that width — so a portrait
+///     clip becomes a tall cell, a landscape clip becomes a short
+///     cell. Clips greedy-fill columns shortest-first, minimising
+///     wasted space. Pinterest-style.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GridLayout {
+    Grid,
+    Mosaic,
+}
+
+/// One cell on the output canvas — either a real input clip or a
+/// solid-black filler (for trailing empty Grid slots / short-column
+/// bottoms in Mosaic). Built by `compute_placements` and consumed by
+/// the filter-graph builder + `xstack` layout string.
+struct Placement {
+    /// `Some(i)` = use input `i`'s video. `None` = generate a black
+    /// `color=` source of the placement's size.
+    input_idx: Option<usize>,
+    x: u32,
+    y: u32,
+    w: u32,
+    h: u32,
+}
+
+/// Stack N≥2 clips (videos and/or images) into a `cols`-wide grid.
+///
+/// Output type depends on inputs:
+///   * Any video present → MP4 output. Static images among the inputs
+///     are looped to match the shortest video's duration via the
+///     `-loop 1 -framerate <fps> -t <dur>` input prefix.
+///   * All-images selection → single still output, codec matched to
+///     the first input (PNG / JPEG / WebP / AVIF / TIFF).
+///
+/// Order is by filename ascending — sorted in the Tauri command before
+/// it gets here, but we sort again here as defence-in-depth so direct
+/// callers (CLI, tests) get the same predictable ordering.
+///
+/// Output filename: `<first-stem>_grid.<ext>`, deduped against existing
+/// files via `unique_output_path`. `ext` is `mp4` for the video path,
+/// otherwise the canonicalised first-input extension.
+pub fn encode_compare_grid_files(
+    ffmpeg: &Path,
+    files: &[PathBuf],
+    cols: u32,
+    layout: GridLayout,
+    settings: &Settings,
+    mut on_progress: impl FnMut(ProgressEvent),
+) -> Result<PathBuf> {
+    use crate::presets::ImageCodec;
+
+    if files.len() < 2 {
+        bail!("Compare grid needs at least two files");
+    }
+
+    // Defence-in-depth sort: encode_compare_grid in commands.rs already
+    // sorts, but CLI / test entrypoints might not.
+    let mut files: Vec<PathBuf> = files.to_vec();
+    files.sort_by_key(|p| {
+        p.file_name()
+            .map(|n| n.to_string_lossy().to_lowercase())
+            .unwrap_or_default()
+    });
+
+    let cols = cols.max(1) as usize;
+    let n = files.len();
+
+    // Probe every input up front. Real videos go through probe_video
+    // (dims + fps). Stills go through probe_dimensions (dims only).
+    // We need each clip's intrinsic aspect for the Mosaic packing, and
+    // the all-images vs mixed detection for the codec-pick later.
+    struct InputInfo {
+        width: u32,
+        height: u32,
+        is_image: bool,
+    }
+    let inputs: Vec<InputInfo> = files
+        .iter()
+        .map(|p| {
+            if is_image_path(p) {
+                let (w, h) = probe_dimensions(ffmpeg, p).unwrap_or((1920, 1080));
+                InputInfo {
+                    width: w.max(2),
+                    height: h.max(2),
+                    is_image: true,
+                }
+            } else {
+                let pr = probe_video(ffmpeg, p);
+                InputInfo {
+                    width: pr.width.unwrap_or(1280).max(2),
+                    height: pr.height.unwrap_or(720).max(2),
+                    is_image: false,
+                }
+            }
+        })
+        .collect();
+
+    let all_images = inputs.iter().all(|i| i.is_image);
+    let first = &files[0];
+    let first_w = inputs[0].width;
+    let first_h = inputs[0].height;
+
+    // Framerate comes from the first VIDEO clip (skipping over any
+    // leading image inputs). Default to 30fps if all inputs are images.
+    let fps = files
+        .iter()
+        .enumerate()
+        .find(|(i, _)| !inputs[*i].is_image)
+        .and_then(|(_, p)| probe_video(ffmpeg, p).fps)
+        .unwrap_or(30);
+
+    // Shortest VIDEO duration — used to clamp image-loop duration in
+    // mixed mode AND to bake into the `color=` filler's `d=` so the
+    // grid terminates cleanly. None when all-images (we're producing
+    // a still then; no time dimension to worry about).
+    let video_duration: Option<f64> = if all_images {
+        None
+    } else {
+        let d = files
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| !inputs[*i].is_image)
+            .filter_map(|(_, p)| probe_duration(ffmpeg, p))
+            .fold(f64::INFINITY, f64::min);
+        if d.is_finite() {
+            Some(d)
+        } else {
+            None
+        }
+    };
+    // Fallback so image-loop `-t` always has a finite value (corrupt
+    // metadata, exotic format that probe_duration can't parse). 5s is
+    // arbitrary but reasonable for "look at these images briefly".
+    let image_loop_duration = video_duration.unwrap_or(5.0);
+
+    // Compute placements for the chosen layout. Both modes return a
+    // Vec<Placement> the rest of the function consumes uniformly.
+    let placements: Vec<Placement> = match layout {
+        GridLayout::Grid => {
+            // Uniform cells inheriting first clip's aspect.
+            let cell_w = (first_w / cols as u32).max(2) & !1;
+            let cell_h = ((cell_w as u64 * first_h as u64 / first_w as u64) as u32).max(2) & !1;
+            let rows = (n + cols - 1) / cols;
+            let total_slots = cols * rows;
+            (0..total_slots)
+                .map(|i| {
+                    let col = (i % cols) as u32;
+                    let row = (i / cols) as u32;
+                    Placement {
+                        input_idx: if i < n { Some(i) } else { None },
+                        x: col * cell_w,
+                        y: row * cell_h,
+                        w: cell_w,
+                        h: cell_h,
+                    }
+                })
+                .collect()
+        }
+        GridLayout::Mosaic => {
+            // Masonry: fixed column width, per-clip scaled height
+            // (aspect-preserving). Greedy assignment of each clip to
+            // the column with smallest current cumulative height —
+            // standard masonry-pack heuristic. Trailing column-bottoms
+            // get black fillers so the final canvas is rectangular.
+            let col_w = (first_w / cols as u32).max(2) & !1;
+            let mut col_y = vec![0u32; cols];
+            let mut placements: Vec<Placement> = Vec::with_capacity(n + cols);
+            for (i, input) in inputs.iter().enumerate() {
+                let scaled_h = ((col_w as u64 * input.height as u64 / input.width as u64)
+                    as u32)
+                    .max(2)
+                    & !1;
+                let (min_col, &min_h) = col_y
+                    .iter()
+                    .enumerate()
+                    .min_by_key(|(_, &h)| h)
+                    .unwrap();
+                placements.push(Placement {
+                    input_idx: Some(i),
+                    x: min_col as u32 * col_w,
+                    y: min_h,
+                    w: col_w,
+                    h: scaled_h,
+                });
+                col_y[min_col] += scaled_h;
+            }
+            let max_h = *col_y.iter().max().unwrap_or(&0);
+            for col in 0..cols {
+                if col_y[col] < max_h {
+                    placements.push(Placement {
+                        input_idx: None,
+                        x: col as u32 * col_w,
+                        y: col_y[col],
+                        w: col_w,
+                        h: max_h - col_y[col],
+                    });
+                }
+            }
+            placements
+        }
+    };
+
+    let canvas_w = placements.iter().map(|p| p.x + p.w).max().unwrap_or(2);
+    let canvas_h = placements.iter().map(|p| p.y + p.h).max().unwrap_or(2);
+
+    // Build the filter graph. For each Placement:
+    //   * input_idx=Some(i): scale [i:v] to (w,h). Grid mode adds a
+    //     pad= so the source's aspect is preserved within the cell;
+    //     Mosaic uses the placement dimensions directly (per-clip
+    //     aspect was already baked in by the packer).
+    //   * input_idx=None: synthesize a `color=` black source at (w,h).
+    //
+    // fps= is included in the chain only for video output. All-images
+    // mode produces a single still — keeping fps in the chain there
+    // would force unnecessary frame duplication during the encode.
+    let mut filter_parts: Vec<String> = Vec::new();
+    let fps_suffix = if all_images {
+        String::new()
+    } else {
+        format!(",fps={fps}")
+    };
+    let filler_color_suffix = if all_images {
+        String::new()
+    } else {
+        // d= clamps the filler to the shortest real-input duration
+        // (avoiding the infinite-source hang). r= matches the shared
+        // framerate. omitted entirely in all-images mode since the
+        // still output is one frame regardless.
+        let dur = match video_duration {
+            Some(d) if d > 0.0 => format!(":d={:.3}", d),
+            _ => String::new(),
+        };
+        format!(":r={fps}{dur}")
+    };
+    for (pi, p) in placements.iter().enumerate() {
+        match p.input_idx {
+            Some(i) => {
+                let inner = match layout {
+                    GridLayout::Grid => format!(
+                        "scale={w}:{h}:force_original_aspect_ratio=decrease,\
+                         pad={w}:{h}:(ow-iw)/2:(oh-ih)/2:color=black",
+                        w = p.w,
+                        h = p.h,
+                    ),
+                    GridLayout::Mosaic => {
+                        // Per-placement dimensions already match the
+                        // clip's aspect; no padding needed.
+                        format!("scale={w}:{h}", w = p.w, h = p.h)
+                    }
+                };
+                filter_parts.push(format!(
+                    "[{i}:v]{inner},setsar=1{fps_suffix}[p{pi}]"
+                ));
+            }
+            None => {
+                filter_parts.push(format!(
+                    "color=c=black:s={w}x{h}{filler_color_suffix},setsar=1[p{pi}]",
+                    w = p.w,
+                    h = p.h,
+                ));
+            }
+        }
+    }
+
+    let layout_str = placements
+        .iter()
+        .map(|p| format!("{}_{}", p.x, p.y))
+        .collect::<Vec<_>>()
+        .join("|");
+    let stacked = (0..placements.len())
+        .map(|i| format!("[p{i}]"))
+        .collect::<String>();
+    // shortest=1 on xstack is a second guard against any input still
+    // being infinite somehow. With duration-clamped fillers this is
+    // usually redundant, but cheap to keep.
+    let filter = format!(
+        "{};{}xstack=inputs={}:layout={}:shortest=1[vh]",
+        filter_parts.join(";"),
+        stacked,
+        placements.len(),
+        layout_str
+    );
+
+    // Output filename + extension. All-images grids keep the first
+    // input's image format; mixed/video always emit MP4.
+    let stem = first
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("output");
+    let first_ext_raw = first
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("mp4")
+        .to_ascii_lowercase();
+    let (out_ext, image_codec): (String, Option<ImageCodec>) = if all_images {
+        let codec = match first_ext_raw.as_str() {
+            "jpg" | "jpeg" => ImageCodec::Jpeg,
+            "webp" => ImageCodec::Webp,
+            "avif" => ImageCodec::Avif,
+            _ => ImageCodec::Png,
+        };
+        // Normalise extension to the codec's canonical form so
+        // "Pic.JPEG" → "Pic_grid.jpg" instead of "Pic_grid.JPEG".
+        (codec.ext().to_string(), Some(codec))
+    } else {
+        ("mp4".to_string(), None)
+    };
+    let base = first
+        .parent()
+        .unwrap_or(Path::new("."))
+        .to_path_buf()
+        .join(format!("{stem}_grid.{out_ext}"));
+    let out = unique_output_path(&base);
+
+    let verbosity = settings.verbosity.clone().unwrap_or_else(|| "warning".into());
+    let input_display = format!("compare-grid: {stem}");
+    let layout_name = match layout {
+        GridLayout::Grid => "Grid",
+        GridLayout::Mosaic => "Mosaic",
+    };
+    let mode_label = if all_images { "still" } else { "video" };
+
+    on_progress(ProgressEvent {
+        file_index: 1,
+        total_files: 1,
+        input: input_display.clone(),
+        stage: "encode".into(),
+        percent: None,
+        message: Some(format!(
+            "Encoding {layout_name} {mode_label} ({canvas_w}×{canvas_h})"
+        )),
+    });
+
+    let mut cmd = Command::new(ffmpeg);
+    cmd.args(["-v", &verbosity, "-y", "-hide_banner"]);
+
+    // Per-input args: image inputs in MIXED mode need -loop 1
+    // -framerate -t to become finite video streams. In all-images mode
+    // images are stills, no loop/duration needed. Real videos always
+    // pass through with just -i.
+    for (i, p) in files.iter().enumerate() {
+        if inputs[i].is_image && !all_images {
+            cmd.args([
+                "-loop",
+                "1",
+                "-framerate",
+                &fps.to_string(),
+                "-t",
+                &format!("{:.3}", image_loop_duration),
+            ]);
+        }
+        cmd.arg("-i").arg(p);
+    }
+
+    cmd.args(["-filter_complex", &filter])
+        .args(["-map", "[vh]"]);
+
+    if let Some(codec) = image_codec {
+        // Still output: cap to a single frame, swap in the right
+        // image codec (PNG/JPEG/WebP/AVIF). No -shortest needed —
+        // -frames:v 1 stops the encode after one frame regardless.
+        cmd.args(["-frames:v", "1"]);
+        append_image_codec_args(&mut cmd, &codec);
+    } else {
+        cmd.args(["-c:v", "libx264", "-preset", "medium", "-crf", "20"])
+            .args(["-pix_fmt", "yuv420p", "-movflags", "+faststart"])
+            .args(["-an"])
+            .args(["-shortest"]);
+    }
+
+    cmd.args(["-progress", "pipe:1"]).arg(&out);
+
+    run_with_progress_cleanup(
+        cmd,
+        video_duration,
+        1,
+        1,
+        &input_display,
+        "encode",
+        &out,
+        &mut on_progress,
+    )?;
+
+    on_progress(ProgressEvent {
+        file_index: 1,
+        total_files: 1,
         input: input_display,
         stage: "done".into(),
         percent: Some(1.0),
@@ -2537,13 +3336,14 @@ pub fn encode_invert_files(
         append_image_codec_args(&mut cmd, &codec);
         cmd.arg(&out);
 
-        run_with_progress(
+        run_with_progress_cleanup(
             cmd,
             None,
             file_index,
             total,
             &input_display,
             "encode",
+            &out,
             &mut on_progress,
         )?;
 
@@ -2712,13 +3512,14 @@ pub fn encode_make_square_files(
         append_image_codec_args(&mut cmd, &codec);
         cmd.arg(&out);
 
-        run_with_progress(
+        run_with_progress_cleanup(
             cmd,
             None,
             file_index,
             total,
             &input_display,
             "encode",
+            &out,
             &mut on_progress,
         )?;
 
@@ -2798,6 +3599,12 @@ pub struct ModifySpec {
     /// preset and consumed by the MP4 encode branch (`-an` instead
     /// of the AAC re-encode + any `-af` audio filters).
     pub remove_audio: bool,
+    /// Trim range in seconds. `None` on either end means "don't seek
+    /// that side" — both `None` is the no-trim default. Set by the
+    /// Modify dialog's two draggable handles overlaying the scrub
+    /// timeline. Ignored for image inputs.
+    pub trim_start_sec: Option<f32>,
+    pub trim_end_sec: Option<f32>,
     /// Replace the source file with the encoded output. Implemented
     /// as encode-to-temp + atomic rename so a failure leaves the
     /// source untouched.
@@ -2834,12 +3641,23 @@ pub fn encode_modify_files(
         // built the rect against the FIRST file's dimensions; if a
         // later file is smaller we'd otherwise emit a filter that
         // reads pixels outside the frame and ffmpeg would error.
+        //
+        // Also force W and H to be even. x264 + yuv420p (our MP4
+        // encode path) reject odd dimensions outright with "height
+        // not divisible by 2" — and the failure mode is non-obvious
+        // because it triggers only when the user crops one edge by
+        // an odd number of pixels (leaving the other at the default
+        // makes an odd cropW the easy way to hit it). One-pixel cost
+        // on the freehand selection is invisible; keeps GIF / image
+        // outputs identical too since they already accept even sizes.
         let clamped_rect = spec.crop_rect.map(|(rx, ry, rw, rh)| {
             let (src_w, src_h) = probe_dimensions(ffmpeg, input).unwrap_or((rx + rw, ry + rh));
             let cx = rx.min(src_w.saturating_sub(1));
             let cy = ry.min(src_h.saturating_sub(1));
             let cw = rw.min(src_w.saturating_sub(cx)).max(1);
             let ch = rh.min(src_h.saturating_sub(cy)).max(1);
+            let cw = (cw & !1).max(2);
+            let ch = (ch & !1).max(2);
             (cx, cy, cw, ch)
         });
 
@@ -2852,6 +3670,8 @@ pub fn encode_modify_files(
             spec.reverse,
             spec.remove_audio,
             spec.rotate,
+            spec.trim_start_sec,
+            spec.trim_end_sec,
         );
 
         let mut bits: Vec<String> = Vec::new();
@@ -2865,6 +3685,14 @@ pub fn encode_modify_files(
         if spec.flip_v { bits.push("flip-v".into()); }
         if spec.reverse { bits.push("reverse".into()); }
         if spec.remove_audio { bits.push("remove-audio".into()); }
+        if spec.trim_start_sec.is_some() || spec.trim_end_sec.is_some() {
+            let s = spec.trim_start_sec.unwrap_or(0.0);
+            let e_str = spec
+                .trim_end_sec
+                .map(|e| format!("{:.2}", e))
+                .unwrap_or_else(|| "end".to_string());
+            bits.push(format!("trim {s:.2}–{e_str}s"));
+        }
         let summary = if bits.is_empty() { "encoding".into() } else { bits.join(" + ") };
 
         on_progress(ProgressEvent {
@@ -2975,6 +3803,7 @@ pub fn encode_modify_files(
 /// fields (`crop_rect`, `modify_flip_h`, `modify_flip_v`,
 /// `modify_reverse`, `modify_remove_audio`, `modify_rotate`) that
 /// `build_filter_chain` and the encode dispatcher read.
+#[allow(clippy::too_many_arguments)]
 pub fn derive_modify_preset(
     ffmpeg: &Path,
     input: &Path,
@@ -2984,6 +3813,8 @@ pub fn derive_modify_preset(
     reverse: bool,
     remove_audio: bool,
     rotate: u32,
+    trim_start_sec: Option<f32>,
+    trim_end_sec: Option<f32>,
 ) -> Preset {
     use crate::presets::{Dither, Format, ImageCodec};
 
@@ -3031,6 +3862,9 @@ pub fn derive_modify_preset(
             // truth no matter what branch ran.
             modify_remove_audio: Some(remove_audio),
             modify_rotate: Some(rotate),
+            modify_trim_start_sec: trim_start_sec,
+            modify_trim_end_sec: trim_end_sec,
+            watermark: None,
             icon: None,
             order: 0,
         };
@@ -3077,6 +3911,9 @@ pub fn derive_modify_preset(
         modify_overwrite: None,
         modify_remove_audio: Some(remove_audio),
         modify_rotate: Some(rotate),
+        modify_trim_start_sec: trim_start_sec,
+        modify_trim_end_sec: trim_end_sec,
+        watermark: None,
         icon: None,
         order: 0,
     }
@@ -3194,13 +4031,14 @@ fn encode_compare_images(
     }
 
     cmd.arg(&out);
-    run_with_progress(
+    run_with_progress_cleanup(
         cmd,
         None,
         file_index,
         total_files,
         &input_display,
         "encode",
+        &out,
         &mut on_progress,
     )?;
 

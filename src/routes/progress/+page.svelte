@@ -150,6 +150,25 @@
       void api.afterFirstPaint().then(() =>
         getCurrentWindow().show().catch(() => {}),
       );
+
+      // OS-level close paths (Alt+F4, title-bar X, taskbar "Close
+      // window") fire `tauri://close-requested` before the window
+      // actually goes away. We intercept it to signal a cancel for
+      // any in-flight encode — otherwise the background thread +
+      // ffmpeg child keep running after the window's gone, churning
+      // out a corrupted output file silently. Same cancel path as
+      // the in-window ✕ button (see close() below).
+      //
+      // We don't preventDefault — the window should still close, we
+      // just want the cancel signal to fire first. cancelEncode is
+      // fire-and-forget; the actual ffmpeg kill happens inside ≤1s
+      // on the Rust side regardless of whether this promise lands.
+      void getCurrentWindow().onCloseRequested(() => {
+        if (didStart && !finished && !errored) {
+          api.cancelEncode().catch(() => {});
+        }
+      });
+
       phase = "subscribing";
       // Subscribe first so we don't miss early events.
       await api.onProgress((e) => {
@@ -206,6 +225,19 @@
       const rotateRaw = parseInt(search.get("rot") ?? "0", 10) || 0;
       const modifyRotate = (rotateRaw === 90 || rotateRaw === 180 || rotateRaw === 270) ? rotateRaw : 0;
       const modifyOverwrite = search.get("ow") === "1";
+      // Modify trim — values in seconds. 0 / 0 means "no trim";
+      // the backend treats anything <= 0 as None and skips the
+      // -ss / -to args entirely.
+      const modifyTrimStart = Math.max(0, parseFloat(search.get("ts") ?? "0") || 0);
+      const modifyTrimEnd = Math.max(0, parseFloat(search.get("te") ?? "0") || 0);
+      // Compare-grid mode — set when the /compare-grid/ dialog
+      // reshapes its own webview into the progress route. URL carries
+      // cols + layout; files are stashed via prepareCompareGridEncode
+      // before the navigation.
+      const isCompareGridFromUrl = search.get("mode") === "compare-grid";
+      const compareGridCols = Math.max(1, parseInt(search.get("cols") ?? "2", 10) || 2);
+      const compareGridLayout: "grid" | "mosaic" =
+        search.get("layout") === "mosaic" ? "mosaic" : "grid";
       // Optional middle-range cut. Both `from` and `to` must be present
       // for the cut to take effect; missing or partial → no cut.
       const fromParam = search.get("from");
@@ -245,7 +277,7 @@
       }
       // Tool paths derive their own settings from the inputs, so they
       // don't need a resolved preset.
-      const isTool = isMerge || isGrayscale || isCompare || isOverlay || isTrim || isInvert || isMakeSquare || isModifyFromUrl;
+      const isTool = isMerge || isGrayscale || isCompare || isOverlay || isTrim || isInvert || isMakeSquare || isModifyFromUrl || isCompareGridFromUrl;
       if (!isTool && !preset) {
         errored = true;
         errorMsg = `No preset was resolved (presetId=${presetId ?? "null"}, customPreset=${customPreset ? "present" : "null"}). The shortcut may be stale.`;
@@ -271,17 +303,19 @@
           ? "starting merge"
           : isGrayscale
             ? "starting greyscale"
-            : isCompare
-              ? "starting compare"
-              : isOverlay
-                ? "starting overlay"
-                : isInvert
-                  ? "starting invert"
-                  : isMakeSquare
-                    ? "starting make square"
-                    : isModifyFromUrl
-                      ? "starting modify"
-                      : "starting encode";
+            : isCompareGridFromUrl
+              ? "starting compare grid"
+              : isCompare
+                ? "starting compare"
+                : isOverlay
+                  ? "starting overlay"
+                  : isInvert
+                    ? "starting invert"
+                    : isMakeSquare
+                      ? "starting make square"
+                      : isModifyFromUrl
+                        ? "starting modify"
+                        : "starting encode";
       armStallTimer();
       didStart = true;
       if (isTrim) {
@@ -302,6 +336,17 @@
         await api.encodeMerge(files);
       } else if (isGrayscale) {
         await api.encodeGrayscale(files);
+      } else if (isCompareGridFromUrl) {
+        // Compare-grid: cols + layout came in via URL params from the
+        // /compare-grid/ dialog. Files were stashed in app state via
+        // prepareCompareGridEncode before the dialog's goto() call.
+        if (files.length < 2) {
+          errored = true;
+          errorMsg = "Compare grid needs at least two files.";
+          finish(0);
+          return;
+        }
+        await api.encodeCompareGrid(files, compareGridCols, compareGridLayout);
       } else if (isCompare) {
         await api.encodeCompare(files);
       } else if (isOverlay) {
@@ -320,7 +365,9 @@
           modifyFlipV ||
           modifyReverse ||
           modifyRemoveAudio ||
-          modifyRotate !== 0;
+          modifyRotate !== 0 ||
+          modifyTrimStart > 0 ||
+          modifyTrimEnd > 0;
         if (!anyTransform) {
           errored = true;
           errorMsg = "Modify was started without any transforms. Open the Modify dialog and pick at least one.";
@@ -330,7 +377,9 @@
         await api.encodeModify(
           files,
           modifyCropX, modifyCropY, modifyCropW, modifyCropH,
-          modifyFlipH, modifyFlipV, modifyReverse, modifyRemoveAudio, modifyRotate, modifyOverwrite,
+          modifyFlipH, modifyFlipV, modifyReverse, modifyRemoveAudio, modifyRotate,
+          modifyTrimStart, modifyTrimEnd,
+          modifyOverwrite,
         );
       } else {
         await api.encode(files, preset!);
@@ -341,17 +390,19 @@
           ? "merging"
           : isGrayscale
             ? "greyscaling"
-            : isCompare
-              ? "stacking"
-              : isOverlay
-                ? "overlaying"
-                : isInvert
-                  ? "inverting"
-                  : isMakeSquare
-                    ? "making square"
-                    : isModifyFromUrl
-                      ? "modifying"
-                      : "encoding";
+            : isCompareGridFromUrl
+              ? "stacking grid"
+              : isCompare
+                ? "stacking"
+                : isOverlay
+                  ? "overlaying"
+                  : isInvert
+                    ? "inverting"
+                    : isMakeSquare
+                      ? "making square"
+                      : isModifyFromUrl
+                        ? "modifying"
+                        : "encoding";
     } catch (err) {
       // Anything that throws — listen(), invoke() failure, serde rejection,
       // FFmpeg-not-found — lands here and surfaces to the user.
@@ -361,7 +412,23 @@
     }
   });
 
-  function close() {
+  async function close() {
+    // If an encode is in flight when the user clicks ✕, signal a
+    // cancel to the Rust side BEFORE closing the window. Without
+    // this, closing the window leaves the background thread +
+    // ffmpeg child process running forever, silently churning out
+    // a corrupted output file. The cancel flips a process-wide
+    // atomic that `run_with_progress` polls once per second; the
+    // ffmpeg child gets killed and the partial output gets deleted
+    // via `cleanup_partial_output`.
+    //
+    // We don't await the encode finishing (cancel is fire-and-
+    // forget) — the user wants the window gone NOW, not after a
+    // graceful shutdown. The cancel propagates inside ≤1s either
+    // way; the window close happens immediately.
+    if (didStart && !finished && !errored) {
+      try { await api.cancelEncode(); } catch { /* fire-and-forget */ }
+    }
     void closeWindow();
   }
 </script>

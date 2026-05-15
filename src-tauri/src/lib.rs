@@ -1,3 +1,9 @@
+// `bootstrap` (FFmpeg download) and `updates` (in-app updater) are
+// HTTP-using modules. In the `studio` build, their public functions
+// become no-op / "feature disabled" stubs while the network code
+// itself is compiled out via internal `#[cfg(not(feature = "studio"))]`
+// gating. Same module names exist in both builds so generate_handler!
+// can list the commands once.
 mod bootstrap;
 mod cli;
 mod commands;
@@ -151,19 +157,25 @@ pub fn run() {
             commands::save_settings,
             commands::ffmpeg_status,
             commands::download_ffmpeg,
+            commands::get_build_variant,
             commands::get_custom_last,
             commands::save_custom_last,
             commands::get_trim_last,
             commands::save_trim_last,
             commands::sync_integrations,
             commands::restart_explorer,
+            commands::setup_modern_menu,
             commands::open_data_folder,
             commands::open_log_folder,
             commands::open_external_url,
+            commands::cancel_encode,
+            commands::pick_watermark_file,
             commands::encode,
             commands::encode_merge,
             commands::encode_grayscale,
             commands::encode_compare,
+            commands::encode_compare_grid,
+            commands::prepare_compare_grid_encode,
             commands::encode_overlay,
             commands::encode_trim,
             commands::encode_invert,
@@ -524,6 +536,21 @@ fn open_window_for_pending(handle: &tauri::AppHandle) {
         match commands::open_trim_window(handle, files) {
             Ok(_) => dlog!("  open_trim_window OK"),
             Err(e) => dlog!("  open_trim_window FAILED: {:#}", e),
+        }
+        return;
+    }
+
+    // Compare-grid: when Compare was invoked with 3+ files, route to
+    // the grid dialog instead of straight to /progress/. The dialog
+    // asks for column count + Grid/Mosaic layout, then navigates its
+    // own webview to /progress/?mode=compare-grid&cols=…&layout=….
+    // 2-file Compare falls through to the existing side-by-side path
+    // (no dialog), preserving the historical behaviour exactly.
+    if compare && files.len() >= 3 {
+        dlog!("  → open_compare_grid_window ({} files)", files.len());
+        match commands::open_compare_grid_window(handle, files) {
+            Ok(_) => dlog!("  open_compare_grid_window OK"),
+            Err(e) => dlog!("  open_compare_grid_window FAILED: {:#}", e),
         }
         return;
     }
