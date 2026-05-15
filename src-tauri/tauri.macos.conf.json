@@ -7,19 +7,7 @@
       "entitlements": "entitlements.plist",
       "minimumSystemVersion": "11.0",
       "exceptionDomain": "",
-      "infoPlist": {
-        "NSServices": [
-          {
-            "NSMenuItem": {
-              "default": "Offspring…"
-            },
-            "NSMessage": "openOffspringPicker",
-            "NSPortName": "Offspring",
-            "NSSendTypes": ["public.file-url"],
-            "NSSendFileTypes": ["public.movie", "public.image", "public.audio"]
-          }
-        ]
-      }
+      "infoPlist": "Info.plist"
     }
   }
 }

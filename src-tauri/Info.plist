@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+    macOS Info.plist additions, merged into the bundle by Tauri at
+    build time. Currently just declares the NSServices entry that
+    integration/services_mac.rs handles: "Offspring…" appears in
+    Finder's right-click → Services submenu after the user enables
+    it in System Settings → Keyboard → Keyboard Shortcuts → Services.
+
+    NSPortName must match the value passed to
+    [NSApp setServicesProvider:] — we set this implicitly via the
+    OffspringServicesProvider class name; "Offspring" is the
+    user-facing port label macOS uses to dispatch to us.
+
+    NSMessage must match the Objective-C selector implemented in
+    services_mac.rs — `openOffspringPicker` becomes
+    `-openOffspringPicker:userData:error:` at the ObjC bridge.
+
+    NSSendFileTypes restricts the menu entry to relevant file types
+    so we don't pollute right-click menus on .txt / .pdf / etc.
+-->
+<plist version="1.0">
+<dict>
+    <key>NSServices</key>
+    <array>
+        <dict>
+            <key>NSMenuItem</key>
+            <dict>
+                <key>default</key>
+                <string>Offspring…</string>
+            </dict>
+            <key>NSMessage</key>
+            <string>openOffspringPicker</string>
+            <key>NSPortName</key>
+            <string>Offspring</string>
+            <key>NSSendTypes</key>
+            <array>
+                <string>public.file-url</string>
+            </array>
+            <key>NSSendFileTypes</key>
+            <array>
+                <string>public.movie</string>
+                <string>public.image</string>
+                <string>public.audio</string>
+            </array>
+        </dict>
+    </array>
+</dict>
+</plist>
