@@ -60,11 +60,36 @@ use crate::presets::{Preset, Settings};
 ///     ...
 ///     Modify...
 ///     Offspring settings
-const ROOT_VERB_PRESETS: &str = "OffspringPresets";
-const ROOT_VERB_TOOLS: &str = "OffspringTools";
+// User-facing brand for menu labels — different between Studio and
+// standard so a user with both installed can tell which build's
+// menu they're invoking. Display strings only; the registry-level
+// verb identifiers are namespaced separately below.
+#[cfg(not(feature = "studio"))]
+const BRAND: &str = "Offspring";
+#[cfg(feature = "studio")]
+const BRAND: &str = "Offspring Studio";
 
+// Studio gets distinct verb + subkey identifiers so its registry
+// entries don't collide with a standard install on the same user
+// account. Rare scenario but technically possible (user trying both
+// variants A/B), and the cost to handle is one cfg-gate each.
+#[cfg(not(feature = "studio"))]
+const ROOT_VERB_PRESETS: &str = "OffspringPresets";
+#[cfg(not(feature = "studio"))]
+const ROOT_VERB_TOOLS: &str = "OffspringTools";
+#[cfg(feature = "studio")]
+const ROOT_VERB_PRESETS: &str = "OffspringStudioPresets";
+#[cfg(feature = "studio")]
+const ROOT_VERB_TOOLS: &str = "OffspringStudioTools";
+
+#[cfg(not(feature = "studio"))]
 const SUB_KEY_NAME_PRESETS: &str = "Offspring.SubCommands.Presets";
+#[cfg(not(feature = "studio"))]
 const SUB_KEY_NAME_TOOLS: &str = "Offspring.SubCommands.Tools";
+#[cfg(feature = "studio")]
+const SUB_KEY_NAME_PRESETS: &str = "OffspringStudio.SubCommands.Presets";
+#[cfg(feature = "studio")]
+const SUB_KEY_NAME_TOOLS: &str = "OffspringStudio.SubCommands.Tools";
 
 /// Legacy keys from earlier versions when there was a single
 /// "Offspring" top-level. We delete these on every sync so users
@@ -130,7 +155,7 @@ pub fn sync(presets: &[Preset], settings: &Settings) -> Result<()> {
     let (presets_root, _) = hkcu
         .create_subkey(&presets_root_path)
         .with_context(|| format!("creating {presets_root_path}"))?;
-    presets_root.set_value("MUIVerb", &"Offspring Presets")?;
+    presets_root.set_value("MUIVerb", &format!("{BRAND} Presets"))?;
     presets_root.set_value("Icon", &format!("{exe},0"))?;
     presets_root.set_value("MultiSelectModel", &"Player")?;
     presets_root.set_value("ExtendedSubCommandsKey", &SUB_KEY_NAME_PRESETS)?;
@@ -161,7 +186,7 @@ pub fn sync(presets: &[Preset], settings: &Settings) -> Result<()> {
     let (tools_root, _) = hkcu
         .create_subkey(&tools_root_path)
         .with_context(|| format!("creating {tools_root_path}"))?;
-    tools_root.set_value("MUIVerb", &"Offspring Tools")?;
+    tools_root.set_value("MUIVerb", &format!("{BRAND} Tools"))?;
     tools_root.set_value("Icon", &format!("{exe},0"))?;
     tools_root.set_value("MultiSelectModel", &"Player")?;
     tools_root.set_value("ExtendedSubCommandsKey", &SUB_KEY_NAME_TOOLS)?;
@@ -201,7 +226,7 @@ pub fn sync(presets: &[Preset], settings: &Settings) -> Result<()> {
     let (settings_key, _) = hkcu
         .create_subkey(&settings_path)
         .with_context(|| format!("creating {settings_path}"))?;
-    settings_key.set_value("MUIVerb", &"Offspring settings")?;
+    settings_key.set_value("MUIVerb", &format!("{BRAND} settings"))?;
     let (settings_cmd, _) = hkcu
         .create_subkey(format!(r"{settings_path}\command"))
         .context("creating settings command subkey")?;

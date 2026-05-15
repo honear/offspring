@@ -36,6 +36,21 @@ export const saveTrimLast = (trim: TrimLast) => invoke<void>("save_trim_last", {
 
 export const syncIntegrations = () => invoke<void>("sync_integrations");
 export const restartExplorer = () => invoke<void>("restart_explorer");
+/** Manual setup path for the Win11 modern right-click menu. Imports
+ *  the shipped shell-extension cert into the current user's
+ *  TrustedPeople store, then registers the MSIX package(s) for the
+ *  active split-layout setting. Surfaced via a Settings button so
+ *  users who opted out at install time, or who are a second user on
+ *  a shared PC, can opt in without re-running the installer. */
+export const setupModernMenu = () => invoke<void>("setup_modern_menu");
+
+/** Returns the build variant the Rust side was compiled as.
+ *  "standard" → full app with FFmpeg downloader, in-app updater, and
+ *  the Win11 modern-menu cert+MSIX integration.
+ *  "studio" → cert-free, no-outbound-network variant. The frontend
+ *  hides the buttons that would call into compiled-out code paths
+ *  (Download FFmpeg, Check for updates, Reinstall modern menu). */
+export const getBuildVariant = () => invoke<"standard" | "studio">("get_build_variant");
 export const openDataFolder = () => invoke<void>("open_data_folder");
 /** Open `%LOCALAPPDATA%\Offspring` in Explorer with `debug.log`
  *  selected (or just the directory when the log doesn't exist yet). */
@@ -47,6 +62,17 @@ export const openLogFolder = () => invoke<void>("open_log_folder");
  *  WebView2. The Rust side rejects non-http(s) schemes. */
 export const openExternalUrl = (url: string) =>
   invoke<void>("open_external_url", { url });
+
+/** Signal any in-flight ffmpeg encode to abort. The next ~1s poll
+ *  tick in `run_with_progress` kills the ffmpeg child + deletes the
+ *  partial output file. Safe to call when no encode is running —
+ *  next encode entry-point resets the flag on the way in. */
+export const cancelEncode = () => invoke<void>("cancel_encode");
+
+/** Open a native file picker filtered to alpha-capable image formats
+ *  and return the chosen path. `null` means the user cancelled.
+ *  Used by the Overlay tool's "Add watermark" toggle. */
+export const pickWatermarkFile = () => invoke<string | null>("pick_watermark_file");
 
 export const encode = (files: string[], preset: Preset) =>
   invoke<void>("encode", { files, preset });
@@ -69,6 +95,18 @@ export const encodeGrayscale = (files: string[]) =>
  *  visual comparison. Output is named `<first-stem>_compare.<ext>`. */
 export const encodeCompare = (files: string[]) =>
   invoke<void>("encode_compare", { files });
+
+/** Compare-grid encode: arrange 3+ clips into a `cols`-wide grid.
+ *  Layout = "grid" preserves each clip's aspect (pads with black);
+ *  layout = "mosaic" scales + crops to fill cells completely. */
+export const encodeCompareGrid = (files: string[], cols: number, layout: "grid" | "mosaic") =>
+  invoke<void>("encode_compare_grid", { files, cols, layout });
+
+/** Stash files in app state ahead of the Compare-grid dialog
+ *  navigating to /progress/. Mirrors `prepareModifyEncode` /
+ *  `prepareTrimEncode`. */
+export const prepareCompareGridEncode = (files: string[]) =>
+  invoke<void>("prepare_compare_grid_encode", { files });
 
 /** Overlay encode: per-file burn-in of corner text + optional border
  *  + optional aspect guides. All config comes from settings.tools.overlay. */
@@ -101,6 +139,8 @@ export const encodeModify = (
   reverse: boolean,
   removeAudio: boolean,
   rotate: number,
+  trimStartSec: number,
+  trimEndSec: number,
   overwrite: boolean,
 ) =>
   invoke<void>("encode_modify", {
@@ -114,6 +154,8 @@ export const encodeModify = (
     reverse,
     removeAudio,
     rotate,
+    trimStartSec,
+    trimEndSec,
     overwrite,
   });
 

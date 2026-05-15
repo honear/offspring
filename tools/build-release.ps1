@@ -148,6 +148,26 @@ try {
     # --- 5. Inno Setup ---------------------------------------------------
     Write-Host ""
     Write-Host "[5/5] Inno Setup (iscc.exe)..." -ForegroundColor Yellow
+
+    # Ensure the WebView2 bootstrapper is present. offspring.iss [Files]
+    # references it; without it iscc errors out. The file is gitignored
+    # (Microsoft-owned binary), so on a fresh clone or after a prune we
+    # need to re-download. Same Microsoft URL the official Tauri docs
+    # point at.
+    $webview2Boot = Join-Path $repoRoot "installer\MicrosoftEdgeWebView2Setup.exe"
+    if (-not (Test-Path $webview2Boot)) {
+        Write-Host "  WebView2 bootstrapper missing - downloading..." -ForegroundColor DarkGray
+        $url = "https://go.microsoft.com/fwlink/p/?LinkId=2124703"
+        try {
+            Invoke-WebRequest -Uri $url -OutFile $webview2Boot -UseBasicParsing
+        } catch {
+            throw "Failed to download WebView2 bootstrapper from $url : $_"
+        }
+        if (-not (Test-Path $webview2Boot)) {
+            throw "Downloaded WebView2 bootstrapper not at $webview2Boot"
+        }
+    }
+
     $iscc = $null
     # Per-machine installs land in Program Files; winget's default
     # per-user install lands under %LOCALAPPDATA%\Programs\. Check both.
@@ -167,11 +187,64 @@ try {
         throw "iscc.exe not found. Install Inno Setup 6 (https://jrsoftware.org/isdl.php) or add iscc.exe to PATH."
     }
     & $iscc (Join-Path $repoRoot "installer\offspring.iss")
-    if ($LASTEXITCODE -ne 0) { throw "iscc.exe failed" }
+    if ($LASTEXITCODE -ne 0) { throw "iscc.exe failed (standard)" }
 
     $installer = Join-Path $repoRoot "installer\dist\Offspring-Setup-$Version.exe"
     if (-not (Test-Path $installer)) {
         throw "Expected installer at $installer but it wasn't produced"
+    }
+
+    # --- 6. Offspring Studio ---------------------------------------------
+    # Same Rust + frontend tree, compiled with --features studio into a
+    # separate target dir so the standard artifact above isn't clobbered.
+    # The Vite build from step 2 still applies (frontendDist = ../build);
+    # the studio build embeds the same compiled frontend, and the runtime
+    # `get_build_variant` Tauri command tells the UI which path to render.
+    #
+    # CRITICAL: we route through `npm run tauri build` (not raw cargo)
+    # because the Tauri CLI sets up the `custom-protocol` feature on
+    # the `tauri` crate, which is what makes the production webview
+    # load the embedded frontendDist instead of trying to reach
+    # `devUrl` (http://localhost:1420). Skipping the CLI yields a
+    # binary that boots into a "localhost refused to connect" error
+    # page because the webview falls back to devUrl. `--no-bundle`
+    # skips Tauri's NSIS bundling — we ship via Inno separately.
+    Write-Host ""
+    Write-Host "[6/7] tauri build --features studio..." -ForegroundColor Yellow
+    $studioTargetDir = Join-Path $repoRoot "target-studio"
+    $prevTargetDir = $env:CARGO_TARGET_DIR
+    $env:CARGO_TARGET_DIR = $studioTargetDir
+    try {
+        npm run tauri build -- --features studio --no-bundle
+        if ($LASTEXITCODE -ne 0) { throw "tauri build --features studio failed" }
+    } finally {
+        if ($null -eq $prevTargetDir) {
+            Remove-Item Env:\CARGO_TARGET_DIR -ErrorAction SilentlyContinue
+        } else {
+            $env:CARGO_TARGET_DIR = $prevTargetDir
+        }
+    }
+    $studioExe = Join-Path $studioTargetDir "release\offspring.exe"
+    if (-not (Test-Path $studioExe)) {
+        throw "studio offspring.exe not at $studioExe after tauri build"
+    }
+
+    # --- 7. Inno Setup (studio) ------------------------------------------
+    Write-Host ""
+    Write-Host "[7/7] Inno Setup (offspring-studio.iss)..." -ForegroundColor Yellow
+    # offspring-studio.iss reads OFFSPRING_STUDIO_BIN_DIR for the bin
+    # path so iscc can be invoked from this same script regardless of
+    # the dev machine's CARGO_TARGET_DIR setup.
+    $env:OFFSPRING_STUDIO_BIN_DIR = (Join-Path $studioTargetDir "release")
+    try {
+        & $iscc (Join-Path $repoRoot "installer\offspring-studio.iss")
+        if ($LASTEXITCODE -ne 0) { throw "iscc.exe failed (studio)" }
+    } finally {
+        Remove-Item Env:\OFFSPRING_STUDIO_BIN_DIR -ErrorAction SilentlyContinue
+    }
+    $studioInstaller = Join-Path $repoRoot "installer\dist\Offspring-Studio-Setup-$Version.exe"
+    if (-not (Test-Path $studioInstaller)) {
+        throw "Expected studio installer at $studioInstaller but it wasn't produced"
     }
 
     # The unversioned "latest" copy is what gets attached to GitHub
@@ -182,22 +255,27 @@ try {
     # marketing site link would otherwise serve a half-finished build.
     $isRelease = $Version -notmatch '-b\d+$'
     $installerLatest = Join-Path $repoRoot "installer\dist\Offspring-Setup.exe"
+    $studioInstallerLatest = Join-Path $repoRoot "installer\dist\Offspring-Studio-Setup.exe"
     if ($isRelease) {
         Copy-Item $installer $installerLatest -Force
+        Copy-Item $studioInstaller $studioInstallerLatest -Force
     }
 
     Write-Host ""
     Write-Host "============================================================" -ForegroundColor Green
     Write-Host " Build OK" -ForegroundColor Green
     Write-Host "============================================================" -ForegroundColor Green
-    Write-Host "  Installer: $installer" -ForegroundColor Green
+    Write-Host "  Standard:  $installer" -ForegroundColor Green
+    Write-Host "  Studio:    $studioInstaller" -ForegroundColor Green
     if ($isRelease) {
-        Write-Host "  Latest:    $installerLatest  (refreshed)" -ForegroundColor Green
+        Write-Host "  Latest:    $installerLatest" -ForegroundColor Green
+        Write-Host "             $studioInstallerLatest" -ForegroundColor Green
     } else {
-        Write-Host "  Latest:    (skipped — local iteration build)" -ForegroundColor DarkGray
+        Write-Host "  Latest:    (skipped - local iteration build)" -ForegroundColor DarkGray
     }
     $size = (Get-Item $installer).Length / 1MB
-    Write-Host ("  Size:      {0:N2} MB" -f $size) -ForegroundColor Green
+    $studioSize = (Get-Item $studioInstaller).Length / 1MB
+    Write-Host ("  Size:      Standard {0:N2} MB / Studio {1:N2} MB" -f $size, $studioSize) -ForegroundColor Green
     Write-Host ""
     if ($isRelease) {
         Write-Host "Install it locally to test, then say 'push' to publish." -ForegroundColor Cyan

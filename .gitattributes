@@ -1,2 +1,7 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+
+# Shell scripts MUST be LF only — macOS / Linux bash chokes on CRLF
+# line endings ("env: bash\r: No such file or directory"). Authored
+# on Windows, executed on Mac, so we force LF on disk + working tree.
+*.sh text eol=lf

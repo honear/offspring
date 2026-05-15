@@ -14,12 +14,13 @@
 #
 #   -Set X.Y.Z[-bNNNN]             Explicit override. Skips both modes.
 #
-# Writes the new version into all five places it lives:
+# Writes the new version into all six places it lives:
 #   package.json
-#   src-tauri/Cargo.toml          (only the [package] version line)
+#   src-tauri/Cargo.toml             (only the [package] version line)
 #   src-tauri/tauri.conf.json
-#   shell-ext/Cargo.toml          (only the [package] version line)
-#   installer/offspring.iss       (both AppVersion and AppVersionMsix)
+#   shell-ext/Cargo.toml             (only the [package] version line)
+#   installer/offspring.iss          (both AppVersion and AppVersionMsix)
+#   installer/offspring-studio.iss   (both AppVersion and AppVersionMsix)
 #
 # The MSIX manifest needs MAJOR.MINOR.BUILD.REVISION four-numeric, so we
 # also derive that form: "0.3.41-b0007" -> "0.3.41.7", "0.3.41" -> "0.3.41.0".
@@ -182,7 +183,8 @@ Set-PackageJsonVersion  (Join-Path $repoRoot "package.json")            $newVers
 Set-CargoPackageVersion (Join-Path $repoRoot "src-tauri\Cargo.toml")    $newVersion
 Set-TauriConfigVersion  (Join-Path $repoRoot "src-tauri\tauri.conf.json") $newVersion
 Set-CargoPackageVersion (Join-Path $repoRoot "shell-ext\Cargo.toml")    $newVersion
-Set-IssVersion          (Join-Path $repoRoot "installer\offspring.iss") $newVersion $msixVersion
+Set-IssVersion          (Join-Path $repoRoot "installer\offspring.iss")        $newVersion $msixVersion
+Set-IssVersion          (Join-Path $repoRoot "installer\offspring-studio.iss") $newVersion $msixVersion
 
 # package-lock.json carries the root project's version field too. `npm
 # install --package-lock-only` syncs it without touching node_modules,

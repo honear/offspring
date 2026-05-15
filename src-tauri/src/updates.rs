@@ -13,20 +13,33 @@
 //! `update_available: false` so a network blip or an empty releases page
 //! never shows up as an error badge.
 
+// Imports gated to the standard build because every one of them is
+// only consumed by HTTP code paths (anyhow/Context for ureq error
+// chains, ureq itself indirectly via fetch_latest, AppHandle/Emitter
+// for download progress, etc.). The studio build needs only Serialize
+// for the UpdateInfo struct, kept in the header below.
+#[cfg(not(feature = "studio"))]
 use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
+#[cfg(not(feature = "studio"))]
 use std::io::{Read, Write};
+#[cfg(not(feature = "studio"))]
 use std::path::PathBuf;
+#[cfg(not(feature = "studio"))]
 use std::time::Duration;
+#[cfg(not(feature = "studio"))]
 use tauri::{AppHandle, Emitter};
 
+#[cfg(not(feature = "studio"))]
 use crate::paths;
 
 /// Owner/repo on GitHub — update this if the repo moves.
+#[cfg(not(feature = "studio"))]
 const GITHUB_SLUG: &str = "second-march/offspring";
 
 /// HTTP timeout for the release metadata check. The asset download uses a
 /// longer read timeout since it streams ~10-30 MB.
+#[cfg(not(feature = "studio"))]
 const TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Pinned minisign public key (raw base64 form — the second line of
@@ -57,6 +70,7 @@ const TIMEOUT: Duration = Duration::from_secs(5);
 /// running `minisign -Vm`. A mismatch in the wild would mean either
 /// a stale install pinned to an older key, or someone trying to
 /// substitute a different signing identity.
+#[cfg(not(feature = "studio"))]
 const UPDATE_MINISIGN_PUBKEY: &str = "RWSozxN0N0fWyF2cXP0fC+q5Hg2kb2zW/ML+e+zItvm7A8BCXNLZunjr";
 
 // Compile-time guard: a build with no pinned pubkey is a build whose
@@ -66,7 +80,9 @@ const UPDATE_MINISIGN_PUBKEY: &str = "RWSozxN0N0fWyF2cXP0fC+q5Hg2kb2zW/ML+e+zItv
 // escape hatch makes "shipped with no pubkey" a strict-error scenario
 // that fails before the installer is even produced. If you ever need
 // to roll the key, set the new value here and the build still passes;
-// only the EMPTY placeholder is rejected.
+// only the EMPTY placeholder is rejected. Gated out of `studio`
+// because that build has no updater at all (no key needed).
+#[cfg(not(feature = "studio"))]
 const _: () = assert!(
     !UPDATE_MINISIGN_PUBKEY.is_empty(),
     "UPDATE_MINISIGN_PUBKEY must be a real minisign public key before this build can ship. \
@@ -88,12 +104,20 @@ pub struct UpdateInfo {
     /// Direct .exe asset URL if we could find an `Offspring-Setup-*.exe`
     /// attached to the release. Empty otherwise.
     pub installer_url: String,
+    /// Release notes body from the GitHub release. Markdown source as
+    /// authored; the Settings page renders it as plain text with
+    /// preserved newlines (no markdown library, no XSS surface). Empty
+    /// when the release has no body or when the check failed.
+    pub release_notes: String,
 }
 
+#[cfg(not(feature = "studio"))]
 #[derive(Deserialize)]
 struct GhRelease {
     tag_name: String,
     html_url: String,
+    #[serde(default)]
+    body: String,
     #[serde(default)]
     prerelease: bool,
     #[serde(default)]
@@ -102,12 +126,14 @@ struct GhRelease {
     assets: Vec<GhAsset>,
 }
 
+#[cfg(not(feature = "studio"))]
 #[derive(Deserialize)]
 struct GhAsset {
     name: String,
     browser_download_url: String,
 }
 
+#[cfg(not(feature = "studio"))]
 #[derive(Serialize, Clone, Debug)]
 pub struct UpdateDownloadEvent {
     /// "downloading" | "done" | "error"
@@ -125,6 +151,7 @@ pub struct UpdateDownloadEvent {
 /// other shape (URL fragments, whitespace, JSON injected through the
 /// `tag_name` slot) is rejected so the rest of the update path doesn't
 /// end up holding an attacker-controlled string.
+#[cfg(not(feature = "studio"))]
 fn is_plausible_tag(tag: &str) -> bool {
     let s = tag.trim_start_matches('v');
     if s.is_empty() || s.len() > 64 {
@@ -160,6 +187,7 @@ fn is_plausible_tag(tag: &str) -> bool {
 /// release JSON was tampered with or the maintainer pasted an asset URL
 /// from a third-party mirror — neither is something we want to silently
 /// download and execute.
+#[cfg(not(feature = "studio"))]
 fn is_trusted_asset_host(url: &str) -> bool {
     const ALLOWED: &[&str] = &[
         "github.com",
@@ -185,6 +213,7 @@ pub fn get_app_version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
 }
 
+#[cfg(not(feature = "studio"))]
 #[tauri::command]
 pub fn check_for_updates() -> UpdateInfo {
     let current = env!("CARGO_PKG_VERSION").to_string();
@@ -209,6 +238,7 @@ pub fn check_for_updates() -> UpdateInfo {
                 update_available,
                 html_url: rel.html_url,
                 installer_url,
+                release_notes: rel.body,
             }
         }
         _ => UpdateInfo {
@@ -218,6 +248,7 @@ pub fn check_for_updates() -> UpdateInfo {
     }
 }
 
+#[cfg(not(feature = "studio"))]
 fn fetch_latest() -> Result<GhRelease> {
     let url = format!("https://api.github.com/repos/{GITHUB_SLUG}/releases/latest");
     let agent = ureq::AgentBuilder::new()
@@ -240,6 +271,7 @@ fn fetch_latest() -> Result<GhRelease> {
 /// `update-download` event. The downloaded file lives at
 /// `%LOCALAPPDATA%\Offspring\updates\Offspring-Setup-<version>.exe` so a
 /// subsequent `install_update` call can find it without re-passing the path.
+#[cfg(not(feature = "studio"))]
 #[tauri::command]
 pub fn download_update(app: AppHandle, version: String, installer_url: String) -> Result<(), String> {
     if installer_url.is_empty() {
@@ -297,6 +329,7 @@ pub fn download_update(app: AppHandle, version: String, installer_url: String) -
 /// We deliberately don't pass Inno's `/RESTARTAPPLICATIONS` — it only
 /// works for applications registered with Windows Restart Manager
 /// (Tauri apps aren't, by default) and silently no-ops otherwise.
+#[cfg(not(feature = "studio"))]
 #[tauri::command]
 pub fn install_update(version: String) -> Result<(), String> {
     let path = installer_path(&version).map_err(|e| e.to_string())?;
@@ -345,16 +378,19 @@ pub fn install_update(version: String) -> Result<(), String> {
     std::process::exit(0);
 }
 
+#[cfg(not(feature = "studio"))]
 fn emit(app: &AppHandle, ev: UpdateDownloadEvent) {
     let _ = app.emit("update-download", ev);
 }
 
+#[cfg(not(feature = "studio"))]
 fn installer_path(version: &str) -> Result<PathBuf> {
     let dir = paths::local_data_dir()?.join("updates");
     std::fs::create_dir_all(&dir).context("creating updates dir")?;
     Ok(dir.join(format!("Offspring-Setup-{version}.exe")))
 }
 
+#[cfg(not(feature = "studio"))]
 fn stream_installer(app: &AppHandle, version: &str, url: &str) -> Result<PathBuf> {
     let final_path = installer_path(version)?;
 
@@ -491,6 +527,7 @@ fn stream_installer(app: &AppHandle, version: &str, url: &str) -> Result<PathBuf
 /// function ("if pubkey blank, log + proceed") was dropped once the
 /// real pubkey was pinned; the const-assert next to UPDATE_MINISIGN_PUBKEY
 /// now makes "shipped with no pubkey" a compile-time error.
+#[cfg(not(feature = "studio"))]
 fn verify_installer_signature(file: &std::path::Path, _version: &str, url: &str) -> Result<()> {
     use minisign_verify::{PublicKey, Signature};
 
@@ -534,10 +571,12 @@ fn verify_installer_signature(file: &std::path::Path, _version: &str, url: &str)
 /// malformed tag never ghosts-shows an update prompt. We deliberately ignore
 /// pre-release suffixes — the GitHub API already filters those via the
 /// `prerelease` flag.
+#[cfg(not(feature = "studio"))]
 fn is_newer(a: &str, b: &str) -> bool {
     parts(a) > parts(b)
 }
 
+#[cfg(not(feature = "studio"))]
 fn parts(v: &str) -> (u32, u32, u32) {
     let mut it = v.split(|c: char| !c.is_ascii_digit() && c != '.').next().unwrap_or("").split('.');
     let major = it.next().and_then(|s| s.parse().ok()).unwrap_or(0);
@@ -546,7 +585,7 @@ fn parts(v: &str) -> (u32, u32, u32) {
     (major, minor, patch)
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "studio")))]
 mod tests {
     use super::*;
 
@@ -604,4 +643,39 @@ mod tests {
             "https://github.com@evil.example.com/foo.exe"
         ));
     }
+}
+
+// ----- studio build: HTTP / updater commands are stubbed out --------
+//
+// All three commands keep their original signatures so the frontend
+// can call them without branching on the build variant — they simply
+// return a clear "feature disabled" error or a degenerate UpdateInfo
+// in the studio case. The actual HTTP / minisign / GitHub-API code
+// above is compiled out by the cfg gates, so the studio binary has
+// no network call sites for these workflows at all.
+
+#[cfg(feature = "studio")]
+#[tauri::command]
+pub fn check_for_updates() -> UpdateInfo {
+    // Returning a default-but-current UpdateInfo lets the Settings
+    // page render "you're on X.Y.Z" without surfacing a confusing
+    // error. The frontend hides the "Check for updates" button in
+    // studio builds anyway (see get_build_variant), so this command
+    // shouldn't normally fire.
+    UpdateInfo {
+        current: env!("CARGO_PKG_VERSION").to_string(),
+        ..Default::default()
+    }
+}
+
+#[cfg(feature = "studio")]
+#[tauri::command]
+pub fn download_update(_version: String, _installer_url: String) -> Result<(), String> {
+    Err("Offspring Studio does not include the in-app updater. Download the latest Studio installer manually from GitHub.".into())
+}
+
+#[cfg(feature = "studio")]
+#[tauri::command]
+pub fn install_update(_version: String) -> Result<(), String> {
+    Err("Offspring Studio does not include the in-app updater.".into())
 }

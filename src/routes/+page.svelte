@@ -13,6 +13,15 @@
   >(null);
   let settings = $state<Settings>({});
   let ffmpeg = $state<FfmpegStatus>({ found: false, path: null });
+  // Build variant: "standard" includes the FFmpeg downloader, in-app
+  // updater, and Win11 modern-menu integration. "studio" compiles
+  // those out and the UI hides their buttons accordingly. Default
+  // "standard" until the backend confirms; if the backend ever fails
+  // to return we render the standard UI, which is strictly more
+  // permissive (the underlying commands will return their own
+  // studio-stub errors if mismatched).
+  let buildVariant = $state<"standard" | "studio">("standard");
+  let isStudio = $derived(buildVariant === "studio");
   let tab = $state<"presets" | "settings">("presets");
   let dirty = $state(false);
   let saving = $state(false);
@@ -230,6 +239,9 @@
         color_4_5: "0xf5d90a",
         guides_opacity: 90,
         metadata_font_scale: 100,
+        watermark_enabled: false,
+        watermark_path: "",
+        watermark_opacity: 100,
       };
     }
     // Back-fill overlay fields for settings loaded from older installs
@@ -241,6 +253,9 @@
     if (settings.tools.overlay.metadata == null) settings.tools.overlay.metadata = true;
     if (settings.tools.overlay.guides_opacity == null) settings.tools.overlay.guides_opacity = 90;
     if (settings.tools.overlay.metadata_font_scale == null) settings.tools.overlay.metadata_font_scale = 100;
+    if (settings.tools.overlay.watermark_enabled == null) settings.tools.overlay.watermark_enabled = false;
+    if (settings.tools.overlay.watermark_path == null) settings.tools.overlay.watermark_path = "";
+    if (settings.tools.overlay.watermark_opacity == null) settings.tools.overlay.watermark_opacity = 100;
   }
 
   onMount(async () => {
@@ -433,6 +448,10 @@
     settings = await api.getSettings();
     ensureTools();
     ffmpeg = await api.ffmpegStatus();
+    // Refresh the build-variant marker once per reload. Cheap (no
+    // network, just a constant lookup in Rust) and tolerant of older
+    // builds without this command — fall back to "standard".
+    try { buildVariant = await api.getBuildVariant(); } catch { buildVariant = "standard"; }
     if (!selectedId && !selectedToolId && presets.length > 0) selectedId = presets[0].id;
     // First-run guidance: if FFmpeg is missing on app open, surface the
     // Settings tab directly so the big "Download FFmpeg" button is the
@@ -1270,6 +1289,70 @@
                 <span>Add border strip so text doesn't cover the image</span>
               </label>
             {/if}
+
+            <label class="inline">
+              <input
+                type="checkbox"
+                checked={settings.tools?.overlay.watermark_enabled ?? false}
+                onchange={(e) => {
+                  ensureTools();
+                  settings.tools!.overlay.watermark_enabled = (e.currentTarget as HTMLInputElement).checked;
+                  saveSettings();
+                }}
+              />
+              <span><strong>Add watermark</strong></span>
+            </label>
+
+            {#if settings.tools?.overlay.watermark_enabled ?? false}
+              <p class="muted tiny indent">
+                Composites a PNG / WebP / TIFF over every frame, scaled to the clip's full resolution. Designed for full-canvas overlays (logo / branding / signature baked into a transparent 1080p / 4K PNG that's the whole frame). JPEG isn't accepted — it has no alpha channel.
+              </p>
+              <div class="row indent" style="margin-top: 6px;">
+                <input
+                  type="text"
+                  readonly
+                  value={settings.tools?.overlay.watermark_path ?? ""}
+                  placeholder="No file picked"
+                  style="flex: 1;"
+                />
+                <button onclick={async () => {
+                  try {
+                    const p = await api.pickWatermarkFile();
+                    if (p) {
+                      ensureTools();
+                      settings.tools!.overlay.watermark_path = p;
+                      await saveSettings();
+                    }
+                  } catch (err) {
+                    alert(String(err));
+                  }
+                }}>Pick…</button>
+                {#if (settings.tools?.overlay.watermark_path ?? "") !== ""}
+                  <button class="ghost" onclick={() => {
+                    ensureTools();
+                    settings.tools!.overlay.watermark_path = "";
+                    saveSettings();
+                  }}>Clear</button>
+                {/if}
+              </div>
+
+              <label class="field indent">
+                <span>Opacity ({settings.tools?.overlay.watermark_opacity ?? 100}%)</span>
+                <input
+                  type="range"
+                  min="0"
+                  max="100"
+                  step="1"
+                  value={settings.tools?.overlay.watermark_opacity ?? 100}
+                  oninput={(e) => {
+                    ensureTools();
+                    const v = parseInt((e.currentTarget as HTMLInputElement).value, 10);
+                    if (Number.isFinite(v)) settings.tools!.overlay.watermark_opacity = v;
+                  }}
+                  onchange={() => saveSettings()}
+                />
+              </label>
+            {/if}
           </div>
         {:else if selectedToolId === "trim"}
           <div class="editor-head">
@@ -1448,8 +1531,25 @@
             {ffmpeg.found ? ffmpeg.path : "not found"}
           </span>
         </p>
+        {#if !ffmpeg.found && ffmpeg.error}
+          <!-- Surface the exact resolution failure inline. Most useful
+               when the user has set a custom path that's invalid:
+               instead of just "not found", they see "isn't named
+               ffmpeg.exe" or "doesn't point at a file" with the path
+               echoed back to them — usually enough to spot the typo. -->
+          <p class="tiny warn-line" style="margin-top: 4px;">{ffmpeg.error}</p>
+        {/if}
 
-        {#if !ffmpeg.found && !dl.active && dl.phase !== "done"}
+        {#if !ffmpeg.found && isStudio}
+          <div class="dl-box">
+            <p class="tiny muted">
+              <strong>Offspring Studio</strong> doesn't download FFmpeg automatically.
+              Grab the LGPL essentials build from
+              <a href="https://www.gyan.dev/ffmpeg/builds/" target="_blank" rel="noreferrer">gyan.dev</a>,
+              extract it, and point the path above at <code>ffmpeg.exe</code>.
+            </p>
+          </div>
+        {:else if !ffmpeg.found && !dl.active && dl.phase !== "done"}
           <div class="dl-box">
             <p class="tiny muted">
               No FFmpeg found. Download the LGPL essentials build (~80 MB) from
@@ -1487,6 +1587,19 @@
         {/if}
       </div>
 
+      {#if isStudio}
+        <div class="card">
+          <h3>Right-click menu</h3>
+          <p class="muted tiny" style="margin-top: 6px;">
+            <strong>Offspring Studio</strong> uses only the classic
+            right-click menu (under "Show more options" on Windows 11).
+            No certificate is ever installed, no MSIX package is
+            registered, and the modern top-level menu is disabled in
+            this build. Configure presets and the menu adjusts
+            automatically.
+          </p>
+        </div>
+      {:else}
       <div class="card">
         <h3>Right-click menu</h3>
         <p class="muted tiny"><br>
@@ -1534,14 +1647,53 @@
             ⚠ Options above may briefly restart Windows Explorer
             (Opened File Explorer windows close).
           </p>
+
+          <div style="margin-top: 8px; padding-top: 10px; border-top: 1px solid var(--border, #2a2a2a);">
+            <p class="muted tiny" style="margin: 0 0 8px 0;">
+              If the modern menu entries aren't showing up, or you're a
+              second Windows user on a shared PC, click below to
+              re-import the shell-extension certificate and re-register
+              the modern-menu package for your user (no admin required).
+            </p>
+            <button
+              onclick={async () => {
+                try {
+                  await api.setupModernMenu();
+                  settings.modern_menu_enabled = true;
+                  try { settings = await api.getSettings(); } catch {}
+                  alert("Modern menu reinstalled. Windows Explorer will restart briefly so the new entries appear.");
+                  try { await api.restartExplorer(); } catch (err) { alert(String(err)); }
+                } catch (err) {
+                  alert("Reinstall failed: " + String(err));
+                }
+              }}
+            >
+              Reinstall Windows 11 modern menu
+            </button>
+          </div>
         </div>
       </div>
+      {/if}
 
       <div class="card">
         <h3>Updates</h3>
         <p class="muted tiny">
           Current version: <strong>{currentVersion || "…"}</strong>
+          {#if isStudio}
+            <span class="badge">Studio</span>
+          {/if}
         </p>
+        {#if isStudio}
+          <p class="muted tiny" style="margin-top: 8px;">
+            <strong>Studio</strong> doesn't include the in-app
+            updater. Check
+            <a href="https://github.com/second-march/offspring/releases" target="_blank" rel="noreferrer">
+              the GitHub releases page
+            </a>
+            manually and download a fresh Studio installer when a new
+            version ships.
+          </p>
+        {:else}
         <div class="row" style="margin-top: 12px;">
           <button onclick={() => checkUpdate({ manual: true })} disabled={updateCheck.checking}>
             {updateCheck.checking ? "Checking…" : "Check for updates"}
@@ -1549,6 +1701,21 @@
         </div>
         {#if updateCheck.manualResult}
           <p class="tiny muted" style="margin-top: 8px;">{updateCheck.manualResult}</p>
+        {/if}
+        {#if update?.update_available && update.release_notes}
+          <!-- Release notes from the latest GitHub release body —
+               rendered as plain text with preserved newlines (no
+               markdown library; the GitHub-side authoring keeps the
+               source readable as-is). Shown only when an update is
+               actually available, so users see "what's new" before
+               deciding to click Download. -->
+          <div class="release-notes">
+            <div class="tiny muted release-notes-head">
+              What's new in {update.latest}
+            </div>
+            <pre class="release-notes-body">{update.release_notes}</pre>
+          </div>
+        {/if}
         {/if}
       </div>
 
@@ -2155,5 +2322,33 @@
     color: #d97706;
     margin-top: 6px;
     font-weight: 500;
+  }
+  /* "What's new in X.Y.Z" panel shown under the manual-check button
+     when an update is available. Plain-text rendering of the GitHub
+     release body — no markdown formatter, no XSS surface. Capped
+     height with overflow-y so a long changelog doesn't push the rest
+     of the Settings pane off-screen. */
+  .release-notes {
+    margin-top: 12px;
+    border-top: 1px solid var(--c-border, rgba(0, 0, 0, 0.1));
+    padding-top: 10px;
+  }
+  .release-notes-head {
+    font-weight: 600;
+    margin-bottom: 6px;
+  }
+  .release-notes-body {
+    margin: 0;
+    max-height: 200px;
+    overflow-y: auto;
+    white-space: pre-wrap;
+    word-break: break-word;
+    font-family: var(--font-mono, monospace);
+    font-size: var(--fs-12);
+    color: var(--c-text-2);
+    background: var(--c-surface-2, rgba(0, 0, 0, 0.04));
+    padding: 8px 10px;
+    border-radius: 4px;
+    line-height: 1.4;
   }
 </style>

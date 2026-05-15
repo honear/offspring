@@ -131,7 +131,15 @@ extern "system" {
 // App-specific tag baked into the mutex/pipe names. The hex tail is a
 // piece of our Inno AppId — unique enough that we won't collide with
 // anything else even if some other app happened to pick "Offspring".
+//
+// Studio gets a distinct tag so it can run side-by-side with the
+// standard build on the same Windows session without their
+// singleton handshakes colliding. Same machine + same user can have
+// both apps open at once if they want to A/B compare.
+#[cfg(not(feature = "studio"))]
 const APP_TAG: &str = "Offspring-Singleton-d8e5c6bc";
+#[cfg(feature = "studio")]
+const APP_TAG: &str = "OffspringStudio-Singleton-4f8a2e15";
 
 fn to_wide_z(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()

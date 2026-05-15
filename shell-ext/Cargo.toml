@@ -1,6 +1,6 @@
 [package]
 name = "offspring-shell-ext"
-version = "0.4.3"
+version = "0.4.4-b0008"
 edition = "2021"
 description = "Windows 11 modern right-click menu handler for Offspring"
 authors = ["Second March"]
@@ -11,7 +11,7 @@ publish = false
 
 [lib]
 # `IExplorerCommand` is loaded by Explorer.exe as a classic COM in-proc
-# server. That means a plain Windows DLL — no Rust-ABI exports, just the
+# server. That means a plain Windows DLL â€” no Rust-ABI exports, just the
 # COM entry points DllGetClassObject / DllCanUnloadNow.
 name = "offspring_shell_ext"
 crate-type = ["cdylib"]

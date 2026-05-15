@@ -216,6 +216,35 @@ pub struct Preset {
     #[serde(skip)]
     pub modify_rotate: Option<u32>,
 
+    /// Trim the input to the half-open range [start, end) seconds
+    /// before any other filters run. Populated by the Modify
+    /// dialog's trim handles. Translates to `-ss <start>` and
+    /// `-to <end>` placed BEFORE `-i <input>` so ffmpeg input-seeks
+    /// and stops decoding at `end` — much cheaper than filter-based
+    /// `trim=` which would decode the whole clip and discard.
+    ///
+    /// Either field can be `None` independently: `None` start means
+    /// "from clip beginning"; `None` end means "to clip end". When
+    /// both are `None`, no trim args are emitted at all.
+    ///
+    /// Image inputs ignore these — there's nothing to trim on a
+    /// single frame.
+    #[serde(skip)]
+    pub modify_trim_start_sec: Option<f32>,
+    #[serde(skip)]
+    pub modify_trim_end_sec: Option<f32>,
+
+    /// PNG / WebP / TIFF watermark to composite on top of the encoded
+    /// video at full-clip resolution. Populated only by the Overlay
+    /// tool when the user enables the "Add watermark" toggle and
+    /// picks a file. When `Some`, the encode command switches from
+    /// `-vf <chain>` to `-filter_complex <chain + overlay>` and pulls
+    /// in the PNG as a second input. The opacity field is 0.0–1.0
+    /// and is applied via `colorchannelmixer=aa=<op>` before the
+    /// `overlay` composite.
+    #[serde(skip)]
+    pub watermark: Option<WatermarkSpec>,
+
     // icon (absolute path or empty to use default)
     #[serde(default)]
     pub icon: Option<String>,
@@ -223,6 +252,26 @@ pub struct Preset {
     // order in SendTo / UI
     #[serde(default)]
     pub order: u32,
+}
+
+/// Watermark composition spec carried by `Preset.watermark`. Populated
+/// by `derive_overlay_preset` when the Overlay tool's "Add watermark"
+/// toggle is on and the user has selected a PNG. The encode dispatcher
+/// reads `path` + `opacity` + the probed `clip_w`/`clip_h` to build a
+/// `-filter_complex` chain that scales the PNG to the clip's exact
+/// dimensions, applies the alpha multiplier, and composites at (0, 0).
+///
+/// Probing the clip dimensions up-front (rather than using ffmpeg's
+/// `scale2ref` filter) means the filter graph is fully static — no
+/// deprecation churn between ffmpeg releases, no surprises if the
+/// user's bundled build doesn't include scale2ref.
+#[derive(Clone, Debug)]
+pub struct WatermarkSpec {
+    pub path: String,
+    /// 0.0–1.0. Multiplied into the watermark's alpha channel.
+    pub opacity: f32,
+    pub clip_w: u32,
+    pub clip_h: u32,
 }
 
 /// In-memory config for the guides block inside Overlay — which
@@ -292,6 +341,14 @@ pub struct OverlayConfig {
     pub font_scale: f32,
     /// When true, include the Guides aspect-ratio boxes in the output.
     pub guides: GuidesConfig,
+    /// "Add watermark" toggle from the Overlay tool settings.
+    pub watermark_enabled: bool,
+    /// Absolute path to the watermark PNG / WebP / TIFF. Empty when
+    /// the user hasn't picked a file yet.
+    pub watermark_path: String,
+    /// 0.0–1.0. Applied to the watermark's alpha channel before
+    /// the overlay composite step.
+    pub watermark_opacity: f32,
 }
 
 #[derive(Serialize, Deserialize, Default, Clone, Debug)]
@@ -681,6 +738,24 @@ pub struct OverlayTool {
     /// Margins + box border scale with it so proportions stay balanced.
     #[serde(default = "default_overlay_font_scale")]
     pub metadata_font_scale: u32,
+
+    /// Gate for the third Overlay section: composite a user-provided
+    /// PNG / WebP / TIFF over every frame, scaled to the clip's exact
+    /// dimensions. Off by default; enabling it without picking a
+    /// `watermark_path` is treated as still-off.
+    #[serde(default)]
+    pub watermark_enabled: bool,
+    /// Absolute path to the watermark file. Empty / missing means
+    /// "user hasn't chosen one"; the encode falls back to a no-op
+    /// watermark step.
+    #[serde(default)]
+    pub watermark_path: String,
+    /// 0–100 UI scale. Converted to 0.0–1.0 before being fed to
+    /// `colorchannelmixer=aa=<f>` in the ffmpeg filter graph. Defaults
+    /// to 100 (fully opaque) since users usually pick a PNG that has
+    /// its own alpha baked in.
+    #[serde(default = "default_watermark_opacity")]
+    pub watermark_opacity: u32,
 }
 
 /// Settings-level shape of a single overlay slot. Parallel to
@@ -727,6 +802,10 @@ fn default_overlay_font_scale() -> u32 {
     100
 }
 
+fn default_watermark_opacity() -> u32 {
+    100
+}
+
 impl Default for OverlayTool {
     fn default() -> Self {
         Self {
@@ -750,6 +829,9 @@ impl Default for OverlayTool {
             color_4_5: default_color_4_5(),
             guides_opacity: default_overlay_opacity(),
             metadata_font_scale: default_overlay_font_scale(),
+            watermark_enabled: false,
+            watermark_path: String::new(),
+            watermark_opacity: default_watermark_opacity(),
         }
     }
 }

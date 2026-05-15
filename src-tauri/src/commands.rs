@@ -13,6 +13,12 @@ use crate::sequence;
 pub struct FfmpegStatus {
     pub found: bool,
     pub path: Option<String>,
+    /// Human-readable reason when `found` is false. Populated from the
+    /// `resolve_ffmpeg` error so the Settings pane can show *why* the
+    /// resolution failed (e.g. "you set a path that isn't ffmpeg.exe")
+    /// instead of a generic "not found" — important when the user has
+    /// an explicit override that turns out to be invalid.
+    pub error: Option<String>,
 }
 
 #[tauri::command]
@@ -56,18 +62,41 @@ pub fn save_settings(settings: Settings) -> Result<(), String> {
 /// Kick off an FFmpeg download in the background. Progress arrives on the
 /// `ffmpeg-download` event with phase "downloading" | "extracting" | "done"
 /// | "error". Returns immediately once the worker thread is spawned.
+///
+/// Studio build: this still routes through bootstrap.rs, but the
+/// studio version of `spawn_download` emits an error event and bails.
+/// The frontend hides the "Download FFmpeg" button in studio anyway
+/// (see `get_build_variant`), so users shouldn't see this fire.
 #[tauri::command]
 pub fn download_ffmpeg(app: tauri::AppHandle) -> Result<(), String> {
     bootstrap::spawn_download(app);
     Ok(())
 }
 
+/// Returns the build variant — "standard" or "studio" — so the UI
+/// can hide capabilities that aren't present in the running binary.
+/// This is the runtime signal that pairs with the Cargo `studio`
+/// feature flag: standard binaries return "standard"; binaries
+/// compiled with `--features studio` return "studio".
+#[tauri::command]
+pub fn get_build_variant() -> &'static str {
+    if cfg!(feature = "studio") { "studio" } else { "standard" }
+}
+
 #[tauri::command]
 pub fn ffmpeg_status() -> FfmpegStatus {
     let s = presets::load_settings().unwrap_or_default();
     match ffmpeg::resolve_ffmpeg(&s) {
-        Ok(p) => FfmpegStatus { found: true, path: Some(p.display().to_string()) },
-        Err(_) => FfmpegStatus { found: false, path: None },
+        Ok(p) => FfmpegStatus {
+            found: true,
+            path: Some(p.display().to_string()),
+            error: None,
+        },
+        Err(e) => FfmpegStatus {
+            found: false,
+            path: None,
+            error: Some(e.to_string()),
+        },
     }
 }
 
@@ -108,6 +137,30 @@ pub fn sync_integrations() -> Result<(), String> {
 #[tauri::command]
 pub fn restart_explorer() -> Result<(), String> {
     integration::modern_menu::restart_explorer().map_err(|e| e.to_string())
+}
+
+/// In-app "Set up Windows 11 modern menu" — for users who unchecked
+/// the optional modern-menu component at install time, or who are a
+/// second user on a shared PC.
+///
+/// Imports the shipped cert into `Cert:\CurrentUser\TrustedPeople`,
+/// then registers whichever MSIX package(s) the current split-layout
+/// setting calls for. No admin rights — everything is user-scope.
+/// The frontend should call `restart_explorer` afterwards (gated on
+/// the usual confirm dialog) so the entries appear immediately.
+#[tauri::command]
+pub fn setup_modern_menu() -> Result<(), String> {
+    integration::modern_menu::trust_cert_user_scope().map_err(|e| e.to_string())?;
+    let presets_list = presets::load_presets().unwrap_or_default();
+    let mut settings = presets::load_settings().unwrap_or_default();
+    // Force-enable the modern-menu setting so the next save_settings or
+    // sync call won't immediately tear down what we just registered.
+    // Persisting it here means a restart picks up the right state too.
+    if settings.modern_menu_enabled != Some(true) {
+        settings.modern_menu_enabled = Some(true);
+        let _ = presets::save_settings(&settings);
+    }
+    integration::modern_menu::sync(&presets_list, &settings).map_err(|e| e.to_string())
 }
 
 /// Resolve `%SystemRoot%\explorer.exe`, falling back to the bare
@@ -206,12 +259,51 @@ pub fn open_external_url(url: String) -> Result<(), String> {
     Ok(())
 }
 
+/// Abort any in-flight ffmpeg encode ASAP. Sets the process-wide
+/// cancel flag in `ffmpeg.rs`; the next `run_with_progress` poll tick
+/// (≤1s) kills the child process and bails. The encode function then
+/// cleans up the partial output file via `cleanup_partial_output` so
+/// the user isn't left with a 0-byte / truncated .mp4 / .gif / etc.
+///
+/// Called by the progress window when the user clicks ✕ during an
+/// active encode (the window's close handler routes through here
+/// before invoking close()). Safe to call when no encode is running —
+/// the flag is just a boolean, and the next encode resets it on entry.
+#[tauri::command]
+pub fn cancel_encode() {
+    ffmpeg::request_cancel();
+}
+
+/// Open a native file picker filtered to image formats and return the
+/// chosen path (or `None` if the user cancelled). Used by the Overlay
+/// tool's "Add watermark" toggle so users get a real Explorer file
+/// browser instead of having to paste a path.
+///
+/// Filter set covers the formats `encode_file`'s watermark step can
+/// actually decode with alpha: PNG, WebP, TIFF, AVIF. JPEG is omitted
+/// on purpose — it has no alpha channel, so picking one would produce
+/// a solid-rectangle watermark instead of a logo cutout.
+#[tauri::command]
+pub async fn pick_watermark_file(app: tauri::AppHandle) -> Result<Option<String>, String> {
+    use tauri_plugin_dialog::DialogExt;
+    let (tx, rx) = std::sync::mpsc::channel();
+    app.dialog()
+        .file()
+        .add_filter("Watermark (with alpha)", &["png", "webp", "tif", "tiff", "avif"])
+        .pick_file(move |path| {
+            let _ = tx.send(path);
+        });
+    let picked = rx.recv().map_err(|e| e.to_string())?;
+    Ok(picked.and_then(|p| p.into_path().ok().map(|pb| pb.to_string_lossy().into_owned())))
+}
+
 #[tauri::command]
 pub fn encode(
     app: tauri::AppHandle,
     files: Vec<String>,
     preset: Preset,
 ) -> Result<(), String> {
+    ffmpeg::reset_cancel();
     let settings = presets::load_settings().unwrap_or_default();
     let ffmpeg_path = ffmpeg::resolve_ffmpeg(&settings).map_err(|e| e.to_string())?;
 
@@ -328,6 +420,7 @@ pub fn encode_merge(
                 .into(),
         );
     }
+    ffmpeg::reset_cancel();
     let settings = presets::load_settings().unwrap_or_default();
     let ffmpeg_path = ffmpeg::resolve_ffmpeg(&settings).map_err(|e| e.to_string())?;
 
@@ -516,6 +609,7 @@ pub fn encode_grayscale(
     if files.is_empty() {
         return Err("Greyscale needs at least one file".into());
     }
+    ffmpeg::reset_cancel();
     let settings = presets::load_settings().unwrap_or_default();
     let ffmpeg_path = ffmpeg::resolve_ffmpeg(&settings).map_err(|e| e.to_string())?;
 
@@ -600,16 +694,101 @@ pub fn encode_compare(
     if files.len() < 2 {
         return Err("Compare needs at least two files".into());
     }
+    ffmpeg::reset_cancel();
     let settings = presets::load_settings().unwrap_or_default();
     let ffmpeg_path = ffmpeg::resolve_ffmpeg(&settings).map_err(|e| e.to_string())?;
-    let paths: Vec<std::path::PathBuf> =
+    let mut paths: Vec<std::path::PathBuf> =
         files.iter().map(std::path::PathBuf::from).collect();
+    // Sort by filename so output order is predictable regardless of
+    // Explorer's click-order. Users naturally expect v01 → v02 → v03
+    // to stack left-to-right in that order, not whatever sequence
+    // Explorer happened to enumerate them in. Case-insensitive so
+    // "Clip_A.mp4" and "clip_b.mp4" sort together cleanly.
+    paths.sort_by_key(|p| {
+        p.file_name()
+            .map(|n| n.to_string_lossy().to_lowercase())
+            .unwrap_or_default()
+    });
 
     std::thread::spawn(move || {
         let app_cl = app.clone();
         let result = ffmpeg::encode_compare_files(
             &ffmpeg_path,
             &paths,
+            &settings,
+            move |ev: ProgressEvent| {
+                let _ = app_cl.emit("encode-progress", ev);
+            },
+        );
+        if let Err(e) = result {
+            let first_display = paths
+                .first()
+                .map(|p| p.display().to_string())
+                .unwrap_or_default();
+            let _ = app.emit(
+                "encode-progress",
+                ProgressEvent {
+                    file_index: 1,
+                    total_files: 1,
+                    input: first_display,
+                    stage: "error".into(),
+                    percent: None,
+                    message: Some(e.to_string()),
+                },
+            );
+        }
+        let _ = app.emit("encode-finished", 1usize);
+    });
+
+    Ok(())
+}
+
+/// Compare-grid tool: arrange N>=3 clips into a `cols`-wide grid
+/// using either Grid (preserve aspect, pad cells) or Mosaic (scale +
+/// crop to fill cells) layout. Routed to from the right-click Compare
+/// entry when the selection is 3+ files — the grid dialog window
+/// opens, the user picks `cols` + `layout`, and the dialog navigates
+/// to /progress/ with those params baked into the URL.
+///
+/// The 2-file case still goes through `encode_compare` (no dialog) so
+/// the historical side-by-side behavior is byte-for-byte unchanged.
+#[tauri::command]
+pub fn encode_compare_grid(
+    app: tauri::AppHandle,
+    files: Vec<String>,
+    cols: u32,
+    layout: String,
+) -> Result<(), String> {
+    if files.len() < 2 {
+        return Err("Compare grid needs at least two files".into());
+    }
+    let cols = cols.max(1).min(files.len() as u32);
+    let layout_enum = match layout.as_str() {
+        "mosaic" => ffmpeg::GridLayout::Mosaic,
+        _ => ffmpeg::GridLayout::Grid,
+    };
+    ffmpeg::reset_cancel();
+    let settings = presets::load_settings().unwrap_or_default();
+    let ffmpeg_path = ffmpeg::resolve_ffmpeg(&settings).map_err(|e| e.to_string())?;
+    let mut paths: Vec<std::path::PathBuf> =
+        files.iter().map(std::path::PathBuf::from).collect();
+    // Sort by filename — see encode_compare for rationale. Order
+    // matters MORE in the grid because the cells fill row-by-row
+    // left-to-right, so any ambiguity in input order shows up as
+    // "this clip isn't where I expected" in the output grid.
+    paths.sort_by_key(|p| {
+        p.file_name()
+            .map(|n| n.to_string_lossy().to_lowercase())
+            .unwrap_or_default()
+    });
+
+    std::thread::spawn(move || {
+        let app_cl = app.clone();
+        let result = ffmpeg::encode_compare_grid_files(
+            &ffmpeg_path,
+            &paths,
+            cols,
+            layout_enum,
             &settings,
             move |ev: ProgressEvent| {
                 let _ = app_cl.emit("encode-progress", ev);
@@ -650,6 +829,7 @@ pub fn encode_overlay(
     if files.is_empty() {
         return Err("Overlay needs at least one file".into());
     }
+    ffmpeg::reset_cancel();
     let settings = presets::load_settings().unwrap_or_default();
     let ffmpeg_path = ffmpeg::resolve_ffmpeg(&settings).map_err(|e| e.to_string())?;
     let ot = settings.tools.overlay.clone();
@@ -692,6 +872,14 @@ pub fn encode_overlay(
                     color_4_5: ot.color_4_5.clone(),
                     opacity: (ot.guides_opacity.min(100) as f32) / 100.0,
                 },
+                // Watermark fields. derive_overlay_preset checks the
+                // path exists on disk and probes the clip's dimensions
+                // to bake into the filter; if any check fails the
+                // resulting Preset.watermark stays None and the
+                // overlay encode skips the watermark step silently.
+                watermark_enabled: ot.watermark_enabled,
+                watermark_path: ot.watermark_path.clone(),
+                watermark_opacity: (ot.watermark_opacity.min(100) as f32) / 100.0,
             };
             let preset = ffmpeg::derive_overlay_preset(&ffmpeg_path, &p, cfg);
             let input = if tools.sequence.enabled {
@@ -761,6 +949,7 @@ pub fn encode_invert(
     if files.is_empty() {
         return Err("Invert needs at least one file".into());
     }
+    ffmpeg::reset_cancel();
     let settings = presets::load_settings().unwrap_or_default();
     let ffmpeg_path = ffmpeg::resolve_ffmpeg(&settings).map_err(|e| e.to_string())?;
     let clamp = settings.tools.invert.clamp;
@@ -812,6 +1001,7 @@ pub fn encode_make_square(
     if files.is_empty() {
         return Err("Make Square needs at least one file".into());
     }
+    ffmpeg::reset_cancel();
     let settings = presets::load_settings().unwrap_or_default();
     let ffmpeg_path = ffmpeg::resolve_ffmpeg(&settings).map_err(|e| e.to_string())?;
     let fill_mode = settings.tools.make_square.fill_mode.clone();
@@ -873,6 +1063,8 @@ pub fn encode_modify(
     reverse: bool,
     remove_audio: bool,
     rotate: u32,
+    trim_start_sec: f32,
+    trim_end_sec: f32,
     overwrite: bool,
 ) -> Result<(), String> {
     if files.is_empty() {
@@ -890,16 +1082,35 @@ pub fn encode_modify(
         _ => 0,
     };
     let rotated = rotate != 0;
+    // Trim is "active" iff start > 0 or end < clip duration. The
+    // frontend can't know the clip duration without a probe, so it
+    // sends BOTH start and end and the backend treats start == 0 +
+    // end == 0 as "no trim". Negative values are nonsense → treated
+    // the same. We only forward Some when the value is meaningful.
+    let trim_start_opt = if trim_start_sec > 0.0 {
+        Some(trim_start_sec)
+    } else {
+        None
+    };
+    let trim_end_opt = if trim_end_sec > 0.0 {
+        Some(trim_end_sec)
+    } else {
+        None
+    };
+    let trimmed = trim_start_opt.is_some() || trim_end_opt.is_some();
     // At least one transform must be active or we'd be doing a
-    // pointless re-encode of the source. "Remove audio" and any
-    // non-zero rotation each count on their own — both are
-    // meaningful changes the user explicitly asked for. Frontend
-    // disables the button in this case but defense-in-depth.
-    if crop_rect.is_none() && !flip_h && !flip_v && !reverse && !remove_audio && !rotated {
+    // pointless re-encode of the source. "Remove audio", any
+    // non-zero rotation, and a real trim each count on their own —
+    // every one is a meaningful change the user explicitly asked
+    // for. Frontend disables the button in this case but
+    // defense-in-depth.
+    if crop_rect.is_none() && !flip_h && !flip_v && !reverse && !remove_audio && !rotated && !trimmed
+    {
         return Err(
-            "Nothing to modify — pick at least one transform (crop / rotate / flip / reverse / remove audio).".into(),
+            "Nothing to modify — pick at least one transform (crop / rotate / flip / reverse / trim / remove audio).".into(),
         );
     }
+    ffmpeg::reset_cancel();
     let settings = presets::load_settings().unwrap_or_default();
     let ffmpeg_path = ffmpeg::resolve_ffmpeg(&settings).map_err(|e| e.to_string())?;
     let paths_in: Vec<std::path::PathBuf> =
@@ -918,6 +1129,8 @@ pub fn encode_modify(
                 reverse,
                 rotate,
                 remove_audio,
+                trim_start_sec: trim_start_opt,
+                trim_end_sec: trim_end_opt,
                 overwrite,
             },
             &settings,
@@ -962,12 +1175,28 @@ pub fn prepare_modify_encode(
     Ok(())
 }
 
+/// Stash files for the Compare-grid dialog ahead of its progress-page
+/// navigation. Same contract as `prepare_modify_encode`: store the
+/// file list in app state so `get_pending_files` from the progress
+/// route can read it after the dialog's `goto("/progress/?…")` call.
+#[tauri::command]
+pub fn prepare_compare_grid_encode(
+    app: tauri::AppHandle,
+    files: Vec<String>,
+) -> Result<(), String> {
+    app.manage_pending_files(files);
+    app.manage_pending_preset(None);
+    app.manage_pending_custom_preset(None);
+    Ok(())
+}
+
 /// Probe (width, height) of a single file. Used by the Crop dialog
 /// to set up display ↔ source pixel coordinate mapping. Returns
 /// `None` when the file can't be probed; the dialog treats that as
 /// an unsupported-input error.
 #[tauri::command]
 pub fn probe_dimensions(path: String) -> Result<Option<(u32, u32)>, String> {
+    ffmpeg::reset_cancel();
     let settings = presets::load_settings().unwrap_or_default();
     let ffmpeg_path = ffmpeg::resolve_ffmpeg(&settings).map_err(|e| e.to_string())?;
     Ok(ffmpeg::probe_dimensions(&ffmpeg_path, std::path::Path::new(&path)))
@@ -987,6 +1216,7 @@ pub fn extract_preview_frame(
     path: String,
     time_seconds: f64,
 ) -> Result<String, String> {
+    ffmpeg::reset_cancel();
     let settings = presets::load_settings().unwrap_or_default();
     let ffmpeg_path = ffmpeg::resolve_ffmpeg(&settings).map_err(|e| e.to_string())?;
 
@@ -1042,6 +1272,7 @@ pub fn encode_trim(
     if start_frames == 0 && end_frames == 0 && remove_range.is_none() {
         return Err("Nothing to trim — set start/end frames or a middle range.".into());
     }
+    ffmpeg::reset_cancel();
     let settings = presets::load_settings().unwrap_or_default();
     let ffmpeg_path = ffmpeg::resolve_ffmpeg(&settings).map_err(|e| e.to_string())?;
     let paths_in: Vec<std::path::PathBuf> =
@@ -1225,8 +1456,37 @@ pub fn open_trim_window(app: &tauri::AppHandle, files: Vec<String>) -> anyhow::R
     Ok(())
 }
 
+/// Compare-grid dialog window. Opened by `merge_pending` when the user
+/// invokes Compare on 3+ files (the 2-file case skips the dialog and
+/// goes straight to progress — see `open_window_for_pending`). Lives
+/// at /compare-grid/ in the SPA; the user picks `cols` + `layout`
+/// there, the dialog calls `prepare_compare_grid_encode` to stash the
+/// files in app state, then navigates this same webview to /progress/
+/// with the params baked into the URL.
+pub fn open_compare_grid_window(app: &tauri::AppHandle, files: Vec<String>) -> anyhow::Result<()> {
+    let (pw, ph) = (440.0, 400.0);
+    let mut b = WebviewWindowBuilder::new(
+        app,
+        "compare-grid",
+        WebviewUrl::App("compare-grid/".into()),
+    )
+        .title("Offspring — Compare Grid")
+        .inner_size(pw, ph)
+        .min_inner_size(380.0, 280.0)
+        .resizable(true)
+        .focused(true)
+        .visible(false);
+    if let Some((x, y)) = position_near_cursor(app, pw, ph) {
+        b = b.position(x, y);
+    }
+    let w = b.build()?;
+    app.manage_pending_files(files);
+    let _ = w; // frontend handles show() + focus dance after first paint
+    Ok(())
+}
+
 pub fn open_main_window(app: &tauri::AppHandle) -> anyhow::Result<()> {
-    let (pw, ph) = (880.0, 760.0);
+    let (pw, ph) = (880.0, 820.0);
     let mut b = WebviewWindowBuilder::new(app, "main", WebviewUrl::App("".into()))
         .title("Offspring")
         .inner_size(pw, ph)

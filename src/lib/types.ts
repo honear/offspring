@@ -206,11 +206,28 @@ export interface OverlayTool {
    *  corner text, its margin from the frame edge, and the box-border
    *  width together so layout stays balanced. */
   metadata_font_scale: number;
+  /** "Add watermark" toggle. When on (and a path is set), the encode
+   *  composites a PNG / WebP / TIFF over every frame, scaled to the
+   *  clip's exact dimensions. Independent of the metadata + guides
+   *  toggles — any combination is valid. */
+  watermark_enabled: boolean;
+  /** Absolute path to the watermark file. Empty string means no file
+   *  picked; backend treats that the same as `enabled === false`. */
+  watermark_path: string;
+  /** 0–100 UI opacity. Multiplied into the watermark's alpha channel
+   *  before the overlay composite step. */
+  watermark_opacity: number;
 }
 
 export interface FfmpegStatus {
   found: boolean;
   path: string | null;
+  /** Human-readable reason when `found` is false — typically the
+   *  message from the failed `resolve_ffmpeg` call. The Settings
+   *  pane shows this so users see exactly why their configured
+   *  path was rejected ("isn't named ffmpeg.exe", "doesn't point
+   *  at a file", etc.) instead of a generic "not found". */
+  error?: string | null;
 }
 
 export interface ProgressEvent {
@@ -233,4 +250,11 @@ export interface UpdateInfo {
   html_url: string;
   /** Direct .exe download URL, or "" if no matching asset was found. */
   installer_url: string;
+  /** GitHub release body — the markdown the maintainer pasted into
+   *  `gh release create --notes`. Rendered as plain text with
+   *  preserved newlines in the Settings pane under the "Check for
+   *  updates" button so the user can read what's new before
+   *  deciding to download. Empty when the check failed or the
+   *  release has no body. */
+  release_notes: string;
 }

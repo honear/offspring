@@ -38,6 +38,22 @@
   let videoDuration = $state(0);
   let videoCurrentTime = $state(0);
 
+  // Unified scrub + trim timeline. Three items share one track:
+  //   * Playhead — what frame is currently shown in the preview
+  //   * Trim start — where the cut begins (default 0)
+  //   * Trim end   — where the cut ends (default = duration)
+  // All three stored in SECONDS to match the video element's
+  // `currentTime` / `duration` units. Encoding only emits `-ss`/`-to`
+  // when the trim handles have moved off the extremes.
+  let trimStartSec = $state(0);
+  let trimEndSec = $state(0);
+  // `null` when no marker is being dragged. Otherwise which marker the
+  // pointer is following. "playhead" includes the bare-track-click case
+  // (clicking anywhere on the track jumps the playhead there).
+  let timelineDrag = $state<"start" | "end" | "playhead" | null>(null);
+  // DOM ref to the timeline track — needed for pointer-to-time mapping.
+  let timelineEl = $state<HTMLDivElement | null>(null);
+
   // ---- Crop rectangle (always in SOURCE pixels) -----------------
   // Defaults to the full frame so Cancel = no-op; the user reduces
   // it by dragging a corner/edge.
@@ -66,6 +82,88 @@
   // Overwrite is the destructive option. Defaulting OFF + a visible
   // warning + the button text changing keeps it from being a footgun.
   let overwrite = $state(false);
+
+  // When the video metadata loads, `bind:duration` populates
+  // `videoDuration` from 0 to the real duration. That's our cue to
+  // seed `trimEndSec` so the end handle sits at the right edge
+  // (= no trim). We use the `0 → real` transition as the trigger;
+  // subsequent duration changes (e.g. user swaps files in the same
+  // dialog session — currently impossible but defensive) leave the
+  // user's hand-set trim alone.
+  $effect(() => {
+    if (videoDuration > 0 && trimEndSec === 0) {
+      trimEndSec = videoDuration;
+    }
+  });
+
+  // Trim is "active" when either handle has been pulled in from the
+  // edge. We use a small tolerance (0.05s) so floating-point round-
+  // trips through the URL don't accidentally count as a trim.
+  const trimActive = $derived(
+    videoDuration > 0 &&
+      (trimStartSec > 0.05 || trimEndSec < videoDuration - 0.05),
+  );
+
+  // Map a pointer's clientX to a timeline timestamp in seconds.
+  function timelineSecFromPointer(e: PointerEvent): number {
+    if (!timelineEl || videoDuration <= 0) return 0;
+    const rect = timelineEl.getBoundingClientRect();
+    const pct = clamp((e.clientX - rect.left) / rect.width, 0, 1);
+    return pct * videoDuration;
+  }
+
+  // Apply a new seconds value to whichever marker is being dragged.
+  // When dragging a trim handle, sync the playhead to it so the
+  // preview always shows the frame at the cut position — that's the
+  // whole point of having the markers on the same timeline as the
+  // scrubber.
+  function applyTimelineDrag(sec: number) {
+    if (timelineDrag === "start") {
+      // Keep at least 0.1s of kept range so a user can't drag start
+      // past end and produce a zero-length output.
+      trimStartSec = clamp(sec, 0, Math.max(0, trimEndSec - 0.1));
+      videoCurrentTime = trimStartSec;
+    } else if (timelineDrag === "end") {
+      trimEndSec = clamp(sec, Math.min(videoDuration, trimStartSec + 0.1), videoDuration);
+      videoCurrentTime = trimEndSec;
+    } else if (timelineDrag === "playhead") {
+      videoCurrentTime = clamp(sec, 0, videoDuration);
+    }
+  }
+
+  // Pointerdown on one of the three timeline markers (start, end,
+  // playhead). The capture call makes subsequent pointermove/up events
+  // fire on the same element even when the cursor leaves it, which
+  // keeps fast drags smooth.
+  function startTimelineDrag(e: PointerEvent, which: "start" | "end" | "playhead") {
+    timelineDrag = which;
+    e.preventDefault();
+    e.stopPropagation();
+    (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+    // First-tick: align the marker to the press location immediately.
+    applyTimelineDrag(timelineSecFromPointer(e));
+  }
+
+  // Pointerdown on the bare track (NOT a marker) jumps the playhead
+  // there. stopPropagation in the marker handler prevents this from
+  // firing when the user clicks on a triangle/playhead — only blank
+  // track space reaches here.
+  function startTrackClick(e: PointerEvent) {
+    if (videoDuration <= 0) return;
+    timelineDrag = "playhead";
+    e.preventDefault();
+    (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+    applyTimelineDrag(timelineSecFromPointer(e));
+  }
+
+  function moveTimelineDrag(e: PointerEvent) {
+    if (!timelineDrag) return;
+    applyTimelineDrag(timelineSecFromPointer(e));
+  }
+
+  function endTimelineDrag() {
+    timelineDrag = null;
+  }
 
   // Clamp helper — keeps every state mutation honest
   function clamp(v: number, lo: number, hi: number): number {
@@ -381,7 +479,7 @@
     files.length > 0 &&
       srcW > 0 &&
       srcH > 0 &&
-      (cropActive || flipH || flipV || reverse || removeAudio || rotate !== 0),
+      (cropActive || flipH || flipV || reverse || removeAudio || rotate !== 0 || trimActive),
   );
 
   async function startModify() {
@@ -420,6 +518,11 @@
       rev: reverse ? "1" : "0",
       ra: removeAudio ? "1" : "0",
       rot: String(rotate),
+      // Trim values in seconds. Only emitted as non-zero when the
+      // user has actually moved a handle inward — the backend treats
+      // start==0 + end==0 as "no trim".
+      ts: trimActive ? trimStartSec.toFixed(3) : "0",
+      te: trimActive ? trimEndSec.toFixed(3) : "0",
       ow: overwrite ? "1" : "0",
     });
     await goto(`/progress/?${params.toString()}`);
@@ -494,16 +597,73 @@
   </div>
 
   {#if previewMode === "video" && videoDuration > 0}
-    <div class="scrub">
-      <input
-        type="range"
-        min="0"
-        max={videoDuration}
-        step="0.01"
-        bind:value={videoCurrentTime}
-      />
-      <span class="tiny muted">
-        {videoCurrentTime.toFixed(2)} / {videoDuration.toFixed(2)} s
+    <!-- Unified timeline. Three draggable items share one track:
+         the playhead (current preview frame), the trim-start handle,
+         and the trim-end handle. Click on bare track space jumps the
+         playhead there. Dragging a trim handle ALSO moves the
+         playhead so the preview shows the frame at the cut point —
+         the user sees exactly which frame they're trimming at. -->
+    <div class="scrub-row">
+      <div
+        class="timeline"
+        bind:this={timelineEl}
+        onpointerdown={startTrackClick}
+        onpointermove={moveTimelineDrag}
+        onpointerup={endTimelineDrag}
+        onpointercancel={endTimelineDrag}
+        title="Click to seek. Drag the orange triangles to trim, the blue dot to scrub."
+      >
+        <!-- Kept region between the two trim handles. Sits at z=1 so
+             the playhead and trim handles render on top. -->
+        <div
+          class="timeline-kept"
+          style="left: {(trimStartSec / videoDuration) * 100}%; width: {((trimEndSec - trimStartSec) / videoDuration) * 100}%;"
+        ></div>
+        <!-- Trim-start handle (orange triangle pointing into kept region). -->
+        <div
+          class="timeline-handle start"
+          style="left: {(trimStartSec / videoDuration) * 100}%;"
+          onpointerdown={(e) => startTimelineDrag(e, "start")}
+          role="slider"
+          tabindex="0"
+          aria-label="Trim start"
+          aria-valuemin="0"
+          aria-valuemax={videoDuration}
+          aria-valuenow={trimStartSec}
+        ></div>
+        <!-- Trim-end handle (orange triangle pointing into kept region). -->
+        <div
+          class="timeline-handle end"
+          style="left: {(trimEndSec / videoDuration) * 100}%;"
+          onpointerdown={(e) => startTimelineDrag(e, "end")}
+          role="slider"
+          tabindex="0"
+          aria-label="Trim end"
+          aria-valuemin="0"
+          aria-valuemax={videoDuration}
+          aria-valuenow={trimEndSec}
+        ></div>
+        <!-- Playhead: thin blue vertical line + circular thumb. Highest
+             z-index so it stays visible even when sitting under a trim
+             handle (which can happen when the user drags a handle:
+             the playhead snaps to it). -->
+        <div
+          class="timeline-playhead"
+          style="left: {(videoCurrentTime / videoDuration) * 100}%;"
+          onpointerdown={(e) => startTimelineDrag(e, "playhead")}
+          role="slider"
+          tabindex="0"
+          aria-label="Playhead"
+          aria-valuemin="0"
+          aria-valuemax={videoDuration}
+          aria-valuenow={videoCurrentTime}
+        ></div>
+      </div>
+      <span class="tiny muted timeline-label">
+        {videoCurrentTime.toFixed(2)} / {videoDuration.toFixed(2)}s
+        {#if trimActive}
+          · trim {trimStartSec.toFixed(2)}–{trimEndSec.toFixed(2)}s
+        {/if}
       </span>
     </div>
   {:else if previewMode === "frame"}
@@ -682,14 +842,101 @@
     background: rgba(0, 0, 0, 0.55);
     pointer-events: none;
   }
-  .scrub {
+  /* Unified scrub + trim timeline. Three items share one track:
+     - .timeline-kept     (red band between the trim handles)
+     - .timeline-handle   (two orange triangle markers at the band edges)
+     - .timeline-playhead (blue line + thumb for the current preview frame)
+     Click on bare track jumps the playhead; dragging a trim handle
+     also moves the playhead so the preview reflects the cut frame. */
+  .scrub-row {
     display: flex;
     align-items: center;
     gap: 8px;
     padding: 0 4px;
+    /* A little headroom for the playhead's thumb which extends above
+       the track. */
+    padding-top: 6px;
   }
-  .scrub input[type="range"] {
+  .timeline {
+    position: relative;
     flex: 1;
+    height: 14px;
+    background: var(--c-surface-2, rgba(255, 255, 255, 0.05));
+    border-radius: 3px;
+    cursor: pointer;
+    /* Child markers extend above/below the track — don't clip them. */
+    overflow: visible;
+    touch-action: none;
+  }
+  .timeline-kept {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    background: rgba(217, 119, 6, 0.45);
+    border-top: 1px solid rgba(217, 119, 6, 0.85);
+    border-bottom: 1px solid rgba(217, 119, 6, 0.85);
+    pointer-events: none;
+    z-index: 1;
+  }
+  .timeline-handle {
+    position: absolute;
+    top: -4px;
+    bottom: -4px;
+    width: 12px;
+    transform: translateX(-50%);
+    cursor: ew-resize;
+    background: #d97706;
+    z-index: 2;
+  }
+  .timeline-handle.start {
+    /* Right-pointing triangle: visible mark sits just inside the
+       kept region. */
+    clip-path: polygon(0 0, 100% 50%, 0 100%);
+  }
+  .timeline-handle.end {
+    clip-path: polygon(100% 0, 0 50%, 100% 100%);
+  }
+  .timeline-handle:hover,
+  .timeline-handle:focus-visible {
+    background: #f59e0b;
+    outline: none;
+  }
+  /* Playhead — thin vertical line with a circular thumb sticking up
+     above the track. Highest z so it stays grabbable even when sitting
+     directly under a trim handle. */
+  .timeline-playhead {
+    position: absolute;
+    top: -3px;
+    bottom: -3px;
+    width: 2px;
+    transform: translateX(-50%);
+    background: var(--c-primary, #2196F3);
+    cursor: ew-resize;
+    z-index: 3;
+  }
+  .timeline-playhead::before {
+    content: '';
+    position: absolute;
+    left: 50%;
+    top: -7px;
+    transform: translateX(-50%);
+    width: 11px;
+    height: 11px;
+    border-radius: 50%;
+    background: var(--c-primary, #2196F3);
+    box-shadow: 0 0 0 1.5px var(--c-surface, white);
+  }
+  .timeline-playhead:hover::before,
+  .timeline-playhead:focus-visible::before {
+    background: var(--c-primary-strong, #1976D2);
+  }
+  .timeline-playhead:focus-visible {
+    outline: none;
+  }
+  .timeline-label {
+    min-width: 150px;
+    text-align: right;
+    font-variant-numeric: tabular-nums;
   }
   .controls {
     display: flex;
