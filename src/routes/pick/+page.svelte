@@ -136,7 +136,7 @@
   {/if}
 </main>
 
-<script context="module" lang="ts">
+<script module lang="ts">
   function fileName(path: string): string {
     // Strip directories — path can be / or \ separated depending on
     // where Finder hands it over. Both work.
