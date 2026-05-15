@@ -104,8 +104,8 @@ jobs:
           $env:MINISIGN_PASSWORD = [System.Text.Encoding]::UTF8.GetString(
               [Convert]::FromBase64String($env:MINISIGN_PASSWORD_B64)
           )
-          Write-Host "Installing rsign2..." -ForegroundColor Cyan
-          cargo install rsign2 --locked --quiet
+          Write-Host "Installing offspring-sign..." -ForegroundColor Cyan
+          cargo install --path tools/offspring-sign --locked --quiet
 
           $keyPath = Join-Path $env:RUNNER_TEMP "minisign.key"
           # The MINISIGN_PRIVATE_KEY secret is stored as the base64
@@ -139,7 +139,7 @@ jobs:
           $studio   = "installer\dist\Offspring-Studio-Setup-$version.exe"
 
           try {
-            pwsh tools/sign-release.ps1 -Tool rsign -KeyPath $keyPath -Files @($standard, $studio)
+            pwsh tools/sign-release.ps1 -Tool offspring-sign -KeyPath $keyPath -Files @($standard, $studio)
           } finally {
             Remove-Item -LiteralPath $keyPath -Force -ErrorAction SilentlyContinue
           }
@@ -250,8 +250,8 @@ jobs:
           # Decode the base64-encoded password. See parallel comment
           # in the Windows sign step for the rationale.
           export MINISIGN_PASSWORD=$(printf '%s' "$MINISIGN_PASSWORD_B64" | base64 -d)
-          echo "Installing rsign2..."
-          cargo install rsign2 --locked --quiet
+          echo "Installing offspring-sign..."
+          cargo install --path tools/offspring-sign --locked --quiet
 
           key_path="$RUNNER_TEMP/minisign.key"
           # MINISIGN_PRIVATE_KEY is base64 of the .key file's raw bytes.
@@ -277,7 +277,7 @@ jobs:
           # array for [string[]] params, so we pass $DMG_PATH directly
           # without the @(...) wrapper that bash would try to parse as
           # a subshell.
-          pwsh tools/sign-release.ps1 -Tool rsign -KeyPath "$key_path" -Files "$DMG_PATH"
+          pwsh tools/sign-release.ps1 -Tool offspring-sign -KeyPath "$key_path" -Files "$DMG_PATH"
 
           rm -f "$key_path"
 

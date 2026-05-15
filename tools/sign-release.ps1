@@ -56,16 +56,19 @@ param(
     [string[]]$Files,
 
     # Which signing tool to invoke.
-    #   - minisign : the reference C implementation (jedisct1/minisign).
-    #                Interactive passphrase prompt via TTY. The local
-    #                default; what's installed via winget on the dev box.
-    #   - rsign    : the Rust port (jedisct1/rsign2). Reads the passphrase
-    #                from stdin with -W (no TTY required), so usable in
-    #                CI where there's no interactive prompt. Output
-    #                .minisig is byte-compatible with minisign's.
-    # In CI mode (-Tool rsign), set $env:MINISIGN_PASSWORD to the
-    # passphrase before invoking — the script pipes it to rsign's stdin.
-    [ValidateSet('minisign','rsign')]
+    #   - minisign       : the reference C implementation (jedisct1/minisign).
+    #                      Interactive passphrase prompt via TTY. The local
+    #                      default; what's installed via winget on the dev box.
+    #   - offspring-sign : custom in-tree Rust binary (tools/offspring-sign).
+    #                      Reads MINISIGN_PASSWORD env var directly via the
+    #                      `minisign` crate's API — no TTY, no stdin pipe,
+    #                      no CLI password-parsing nightmares. The CI mode.
+    #
+    # The previous rsign2 attempt is gone: rsign2's CLI has no
+    # stdin-or-env password input (its `-W` flag means "passwordless
+    # key", not "read password from stdin"), so it's structurally
+    # unsuitable for CI without a pseudo-TTY.
+    [ValidateSet('minisign','offspring-sign')]
     [string]$Tool = 'minisign',
 
     # Force re-signing even if a .minisig already exists. Off by
@@ -137,8 +140,9 @@ key up offline. See RELEASING.md for details.
 }
 
 # Locate the signing tool. minisign (default) is the C reference impl
-# installed via winget; rsign (CI mode) is the Rust port installed via
-# `cargo install rsign2`. Both produce byte-compatible .minisig files.
+# installed via winget; offspring-sign (CI mode) is the in-tree Rust
+# binary at tools/offspring-sign which uses the `minisign` crate
+# directly. Both produce byte-compatible .minisig files.
 $toolBin = Get-Command $Tool -ErrorAction SilentlyContinue
 if (-not $toolBin) {
     if ($Tool -eq 'minisign') {
@@ -152,21 +156,21 @@ Close and reopen the terminal so PATH picks up the new exe, then re-run.
 "@
     } else {
         throw @"
-rsign not found on PATH.
+offspring-sign not found on PATH.
 
-Install it with:
-    cargo install rsign2 --locked
+Build + install it from the repo root with:
+    cargo install --path tools/offspring-sign --locked
 
-If running in CI, add an install step before invoking this script.
+In CI, the workflow installs it before invoking this script.
 "@
     }
 }
 
-# CI mode pre-flight: rsign needs the passphrase on stdin, which we
-# pipe from $env:MINISIGN_PASSWORD. Refuse to start if it's missing
-# rather than hang on an EOF-stdin read.
-if ($Tool -eq 'rsign' -and [string]::IsNullOrEmpty($env:MINISIGN_PASSWORD)) {
-    throw "Tool 'rsign' requires `$env:MINISIGN_PASSWORD to be set (passphrase piped to stdin)."
+# CI mode pre-flight: offspring-sign reads the passphrase from
+# $env:MINISIGN_PASSWORD. Refuse to start if it's missing rather than
+# pass an empty password and get a confusing decrypt error.
+if ($Tool -eq 'offspring-sign' -and [string]::IsNullOrEmpty($env:MINISIGN_PASSWORD)) {
+    throw "Tool 'offspring-sign' requires `$env:MINISIGN_PASSWORD to be set."
 }
 
 # Pre-flight: refuse if any target has an existing .minisig and
@@ -211,7 +215,7 @@ if ($Tool -eq 'minisign') {
     Write-Host "minisign will prompt for the key password ONCE per file." -ForegroundColor DarkGray
     Write-Host "(Same passphrase across files — minisign doesn't cache it across invocations.)" -ForegroundColor DarkGray
 } else {
-    Write-Host "rsign mode: passphrase piped from `$env:MINISIGN_PASSWORD." -ForegroundColor DarkGray
+    Write-Host "offspring-sign mode: passphrase read from `$env:MINISIGN_PASSWORD." -ForegroundColor DarkGray
 }
 Write-Host ""
 
@@ -239,51 +243,14 @@ foreach ($p in $installers) {
             throw "minisign signing failed (exit $LASTEXITCODE) on $p"
         }
     } else {
-        # rsign reads the passphrase from stdin when `-W` is set. We
-        # used to use PowerShell's `$str | native_command` pipe to feed
-        # it, but that path is unreliable: PowerShell goes through
-        # its formatting subsystem before writing to the child's stdin,
-        # which can re-encode bytes, drop or duplicate the trailing
-        # newline, or stall on macOS. Using .NET's ProcessStartInfo
-        # directly bypasses all of that — we get an explicit handle to
-        # the child's stdin and write the exact bytes we want.
+        # offspring-sign reads MINISIGN_PASSWORD straight from the
+        # environment, so we just invoke it with the right args and
+        # check the exit code. No stdin pipes, no encoding gotchas.
         $sigPath = "$p.minisig"
-        # Strip any trailing CR/LF that may have ridden along with the
-        # secret value (common when a CRLF-flavoured string was pasted
-        # into the GH secret UI). Without this rsign sees "password\r"
-        # and fails with "Wrong password for that key".
-        $pw = $env:MINISIGN_PASSWORD -replace '[\r\n]+$', ''
-        Write-Host "  (password length: $($pw.Length))" -ForegroundColor DarkGray
-
-        $psi = New-Object System.Diagnostics.ProcessStartInfo
-        $psi.FileName = $toolBin.Source
-        foreach ($arg in @('sign', '-W',
-                           '-s', $KeyPath,
-                           '-x', $sigPath,
-                           '-t', $buildId,
-                           '-c', $untrusted,
-                           $p)) {
-            [void]$psi.ArgumentList.Add($arg)
-        }
-        $psi.RedirectStandardInput = $true
-        $psi.UseShellExecute = $false
-        $proc = [System.Diagnostics.Process]::Start($psi)
-        # Write the password as raw UTF-8 bytes to the child's stdin —
-        # NO trailing newline. rsign2 with -W reads bytes from stdin
-        # and trusts what it gets; an appended \n would be consumed as
-        # part of the password and produce "Wrong password for that
-        # key". Closing the input stream signals EOF, which is the
-        # documented way to terminate a -W read. (We previously sent
-        # password + "\n", which is the right behavior for tools that
-        # read until newline like the interactive minisign CLI but the
-        # wrong behavior for rsign2's stdin pipe.)
-        $stdinBytes = [System.Text.Encoding]::UTF8.GetBytes($pw)
-        $proc.StandardInput.BaseStream.Write($stdinBytes, 0, $stdinBytes.Length)
-        $proc.StandardInput.BaseStream.Flush()
-        $proc.StandardInput.Close()
-        $proc.WaitForExit()
-        if ($proc.ExitCode -ne 0) {
-            throw "rsign signing failed (exit $($proc.ExitCode)) on $p"
+        Write-Host "  (password length: $($env:MINISIGN_PASSWORD.Length))" -ForegroundColor DarkGray
+        & $toolBin.Source $KeyPath $p $sigPath $buildId $untrusted
+        if ($LASTEXITCODE -ne 0) {
+            throw "offspring-sign failed (exit $LASTEXITCODE) on $p"
         }
     }
 
