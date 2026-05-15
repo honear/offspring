@@ -1,0 +1,12 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "bundle": {
+    "targets": ["dmg"],
+    "category": "public.app-category.video",
+    "macOS": {
+      "entitlements": "entitlements.plist",
+      "minimumSystemVersion": "11.0",
+      "exceptionDomain": ""
+    }
+  }
+}

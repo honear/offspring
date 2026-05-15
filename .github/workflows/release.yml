@@ -1,52 +1,61 @@
-name: Release
-
-# Default release flow is LOCAL: build + test via `tools/build-release.ps1`,
-# then publish with `gh release create vX.Y.Z installer/dist/Offspring-Setup-X.Y.Z.exe`.
-# This workflow is kept as a manual fallback (workflow_dispatch) for the
-# occasional rebuild on a clean runner — e.g. to verify a local build was
-# reproducible, or to re-attach an installer to an existing tag from CI.
+# Offspring build + release pipeline.
 #
-# The in-app updater (src-tauri/src/updates.rs) looks for an asset whose name
-# starts with "Offspring-Setup" and ends in ".exe" on the latest release.
-# Don't rename the asset without updating that matcher.
+# Triggers:
+#   - push to main          -> builds all 3 installers, uploads as workflow artifacts
+#   - push of tag vX.Y.Z    -> same builds, then drops everything into a DRAFT release
+#   - workflow_dispatch     -> manual button for ad-hoc builds from any ref
+#
+# Signing is graceful:
+#   - MINISIGN_PRIVATE_KEY missing  -> installers ship unsigned, build still succeeds
+#   - APPLE_CERTIFICATE missing     -> .dmg ships unsigned + unnotarized, build still succeeds
+#   This lets you merge a workflow change and watch it go green before all
+#   8 secrets are configured. Fill in secrets as you gather them; the next
+#   push starts signing automatically.
+#
+# Local builds (tools/build-release.ps1, tools/sign-release.ps1) remain the
+# source of truth for iteration. CI mirrors those scripts via the -NoBump
+# and -Tool rsign flags so the artifacts are byte-identical to what a
+# local run on the same commit would produce.
+
+name: Build & Release
 
 on:
+  push:
+    branches: [main]
+    tags: ['v*']
   workflow_dispatch:
-    inputs:
-      tag:
-        description: "Tag to build (e.g. v0.3.15). Must already exist on origin."
-        required: true
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
-  contents: write  # required to create releases and upload assets
+  contents: write  # for creating draft releases on tag pushes
 
 jobs:
-  build:
+  # =====================================================================
+  # Windows: Standard + Studio in a single job (build-release.ps1 already
+  # produces both via the same `npm run tauri build` + a second pass with
+  # --features studio).
+  # =====================================================================
+  windows:
+    name: Windows (Standard + Studio)
     runs-on: windows-latest
-    env:
-      # Keep the runner's cargo cache on the job's workspace disk so the
-      # cache action below actually hits it.
-      CARGO_TERM_COLOR: always
-
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event.inputs.tag }}
 
-      - name: Derive version from tag
+      - name: Read version from package.json
         id: ver
         shell: bash
-        run: |
-          TAG="${{ github.event.inputs.tag }}"
-          VERSION="${TAG#v}"
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "tag=$TAG"           >> "$GITHUB_OUTPUT"
+        run: echo "version=$(node -p "require('./package.json').version")" >> "$GITHUB_OUTPUT"
 
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
 
       - name: Setup Rust toolchain
@@ -54,7 +63,99 @@ jobs:
         with:
           targets: x86_64-pc-windows-msvc
 
-      - name: Cache Cargo registry + target
+      - name: Cache Cargo registry + target dirs
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            src-tauri/target
+            target-studio
+            shell-ext/target
+          key: cargo-${{ runner.os }}-${{ hashFiles('src-tauri/Cargo.lock', 'shell-ext/Cargo.lock') }}
+          restore-keys: cargo-${{ runner.os }}-
+
+      - name: npm ci
+        run: npm ci
+
+      - name: Install Inno Setup
+        run: choco install innosetup --no-progress -y
+
+      - name: Build Standard + Studio installers
+        shell: pwsh
+        run: pwsh tools/build-release.ps1 -NoBump -SkipInstall
+
+      - name: Sign installers (rsign)
+        # Graceful degradation: skip silently when the minisign secret
+        # isn't configured. Lets unsigned iteration builds succeed.
+        shell: pwsh
+        env:
+          MINISIGN_PRIVATE_KEY: ${{ secrets.MINISIGN_PRIVATE_KEY }}
+          MINISIGN_PASSWORD: ${{ secrets.MINISIGN_PASSWORD }}
+        run: |
+          if ([string]::IsNullOrEmpty($env:MINISIGN_PRIVATE_KEY)) {
+            Write-Host "MINISIGN_PRIVATE_KEY not set - skipping signing." -ForegroundColor Yellow
+            exit 0
+          }
+          Write-Host "Installing rsign2..." -ForegroundColor Cyan
+          cargo install rsign2 --locked --quiet
+
+          $keyPath = Join-Path $env:RUNNER_TEMP "minisign.key"
+          # -NoNewline so we don't append CRLF and corrupt the key format.
+          [System.IO.File]::WriteAllText($keyPath, $env:MINISIGN_PRIVATE_KEY)
+
+          $version = "${{ steps.ver.outputs.version }}"
+          $standard = "installer\dist\Offspring-Setup-$version.exe"
+          $studio   = "installer\dist\Offspring-Studio-Setup-$version.exe"
+
+          try {
+            pwsh tools/sign-release.ps1 -Tool rsign -KeyPath $keyPath -Files @($standard, $studio)
+          } finally {
+            Remove-Item -LiteralPath $keyPath -Force -ErrorAction SilentlyContinue
+          }
+
+      - name: Upload Windows artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-installers
+          if-no-files-found: error
+          retention-days: 90
+          path: |
+            installer/dist/Offspring-Setup-*.exe
+            installer/dist/Offspring-Setup-*.exe.minisig
+            installer/dist/Offspring-Studio-Setup-*.exe
+            installer/dist/Offspring-Studio-Setup-*.exe.minisig
+
+  # =====================================================================
+  # macOS: universal binary (arm64 + x86_64), signed + notarized via
+  # Tauri's built-in pipeline. Tauri picks up the APPLE_* env vars and
+  # handles cert import, codesign, notarytool submit, and stapling.
+  # =====================================================================
+  macos:
+    name: macOS (universal)
+    runs-on: macos-latest
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Read version from package.json
+        id: ver
+        run: echo "version=$(node -p "require('./package.json').version")" >> "$GITHUB_OUTPUT"
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Setup Rust toolchain (both Apple targets)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - name: Cache Cargo registry + target dir
         uses: actions/cache@v4
         with:
           path: |
@@ -62,62 +163,106 @@ jobs:
             ~/.cargo/git
             src-tauri/target
           key: cargo-${{ runner.os }}-${{ hashFiles('src-tauri/Cargo.lock') }}
-          restore-keys: |
-            cargo-${{ runner.os }}-
+          restore-keys: cargo-${{ runner.os }}-
 
-      - name: npm install
+      - name: npm ci
         run: npm ci
 
-      - name: Build app (tauri build)
-        run: npm run tauri build
-
-      - name: Build shell-extension DLL
-        # Phase 3 crate — produces offspring_shell_ext.dll which the MSIX
-        # references via its manifest. The release-time dll ends up in
-        # shell-ext/target/release/ (or CARGO_TARGET_DIR/release if the
-        # workspace ever starts sharing a target dir).
-        shell: pwsh
+      - name: Build universal .dmg (signed + notarized when secrets set)
+        env:
+          # Tauri auto-detects these and handles cert import + codesign +
+          # notarization end-to-end. When any of them is empty, Tauri
+          # skips the signing/notarization steps and produces an
+          # unsigned .dmg (gatekeeper warning on first launch but
+          # otherwise functional for iteration).
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          # Tauri needs a temp keychain password when importing the cert.
+          # Any non-empty value works; runner discards the keychain after
+          # the job ends.
+          CI_KEYCHAIN_PWD: ${{ github.run_id }}-${{ github.run_attempt }}
         run: |
-          cd shell-ext
-          cargo build --release
-          Get-Item target/release/offspring_shell_ext.dll
+          npm run tauri build -- \
+            --config src-tauri/tauri.macos.conf.json \
+            --target universal-apple-darwin
 
-      - name: Stage shell-ext DLL next to offspring.exe
-        # Both artifacts need to live in the install directory at
-        # Add-AppxPackage time. Copying it alongside offspring.exe now
-        # means the Inno [Files] section picks it up automatically.
-        shell: pwsh
-        run: Copy-Item shell-ext/target/release/offspring_shell_ext.dll src-tauri/target/release/ -Force
-
-      - name: Build + sign MSIX sparse package
-        shell: pwsh
+      - name: Locate built .dmg
+        id: dmg
         run: |
-          $version = "${{ steps.ver.outputs.version }}.0"
-          pwsh installer/msix/build-msix.ps1 -Version $version
+          dmg=$(ls src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg | head -n1)
+          if [ -z "$dmg" ]; then
+            echo "No .dmg produced — check the tauri build step." >&2
+            exit 1
+          fi
+          echo "path=$dmg" >> "$GITHUB_OUTPUT"
+          echo "Built: $dmg"
 
-      - name: Install Inno Setup
-        run: choco install innosetup --no-progress -y
-
-      - name: Copy offspring.exe into expected pre-ISS location
-        # The Inno script references ..\src-tauri\target\release\offspring.exe
-        # relative to installer/. In a default `npm run tauri build` on CI
-        # that's exactly where the binary lands.
-        shell: pwsh
-        run: Get-Item src-tauri/target/release/offspring.exe
-
-      - name: Compile Inno Setup installer
-        shell: pwsh
+      - name: Sign .dmg (rsign)
+        env:
+          MINISIGN_PRIVATE_KEY: ${{ secrets.MINISIGN_PRIVATE_KEY }}
+          MINISIGN_PASSWORD: ${{ secrets.MINISIGN_PASSWORD }}
+          DMG_PATH: ${{ steps.dmg.outputs.path }}
         run: |
-          & "C:\Program Files (x86)\Inno Setup 6\iscc.exe" installer/offspring.iss
-          Get-ChildItem installer/dist/
+          if [ -z "$MINISIGN_PRIVATE_KEY" ]; then
+            echo "MINISIGN_PRIVATE_KEY not set - skipping signing."
+            exit 0
+          fi
+          echo "Installing rsign2..."
+          cargo install rsign2 --locked --quiet
 
-      - name: Create GitHub Release + upload installer
+          key_path="$RUNNER_TEMP/minisign.key"
+          printf '%s' "$MINISIGN_PRIVATE_KEY" > "$key_path"
+          chmod 600 "$key_path"
+
+          # macos-latest ships pwsh — same script as Windows uses.
+          pwsh tools/sign-release.ps1 -Tool rsign -KeyPath "$key_path" -Files @("$DMG_PATH")
+
+          rm -f "$key_path"
+
+      - name: Upload macOS artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-installer
+          if-no-files-found: error
+          retention-days: 90
+          path: |
+            src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg
+            src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg.minisig
+
+  # =====================================================================
+  # Draft release: only runs on tag pushes. Collects all 6 assets and
+  # creates a draft you publish manually after smoke-testing the artifacts.
+  # =====================================================================
+  release:
+    name: Draft release
+    needs: [windows, macos]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - name: Download Windows artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: windows-installers
+          path: dist/
+
+      - name: Download macOS artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: macos-installer
+          path: dist/
+
+      - name: List assets
+        run: ls -la dist/
+
+      - name: Create draft release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ steps.ver.outputs.tag }}
-          name: Offspring ${{ steps.ver.outputs.version }}
-          draft: false
-          prerelease: false
+          draft: true
+          name: Offspring ${{ needs.windows.outputs.version }}
+          tag_name: ${{ github.ref_name }}
           generate_release_notes: true
-          files: |
-            installer/dist/Offspring-Setup-${{ steps.ver.outputs.version }}.exe
+          files: dist/*

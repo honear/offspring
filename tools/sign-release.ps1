@@ -50,6 +50,24 @@ param(
     # partial re-sign (e.g. you rebuilt just the studio variant).
     [string]$InstallerPath,
 
+    # Explicit list of files to sign. Overrides version-based discovery
+    # entirely — useful from CI where the artifact set isn't necessarily
+    # the standard+studio Windows pair (e.g. a single .dmg on macOS).
+    [string[]]$Files,
+
+    # Which signing tool to invoke.
+    #   - minisign : the reference C implementation (jedisct1/minisign).
+    #                Interactive passphrase prompt via TTY. The local
+    #                default; what's installed via winget on the dev box.
+    #   - rsign    : the Rust port (jedisct1/rsign2). Reads the passphrase
+    #                from stdin with -W (no TTY required), so usable in
+    #                CI where there's no interactive prompt. Output
+    #                .minisig is byte-compatible with minisign's.
+    # In CI mode (-Tool rsign), set $env:MINISIGN_PASSWORD to the
+    # passphrase before invoking — the script pipes it to rsign's stdin.
+    [ValidateSet('minisign','rsign')]
+    [string]$Tool = 'minisign',
+
     # Force re-signing even if a .minisig already exists. Off by
     # default to prevent accidentally re-signing a build whose bytes
     # have changed since the last signature was made (which would
@@ -68,11 +86,19 @@ if (-not $KeyPath) {
     }
 }
 
-# Build the list of installers to sign. If the caller passed an
-# explicit path we honour it (single-file mode). Otherwise we pick
-# up BOTH variants from package.json's version.
+# Build the list of installers to sign. Resolution order:
+#   1. -Files (explicit array, used from CI for arbitrary artifact sets)
+#   2. -InstallerPath (single-file local override)
+#   3. version-based discovery for both Windows installers (default)
 $installers = @()
-if ($InstallerPath) {
+if ($Files -and $Files.Count -gt 0) {
+    foreach ($f in $Files) {
+        if (-not (Test-Path -LiteralPath $f)) {
+            throw "File to sign not found: $f"
+        }
+        $installers += (Resolve-Path -LiteralPath $f).Path
+    }
+} elseif ($InstallerPath) {
     $installers += (Resolve-Path -LiteralPath $InstallerPath).Path
 } else {
     $pkg = Get-Content (Join-Path $repoRoot "package.json") -Raw | ConvertFrom-Json
@@ -110,13 +136,13 @@ key up offline. See RELEASING.md for details.
 "@
 }
 
-# Locate minisign.exe. winget installs it under
-# %LOCALAPPDATA%\Microsoft\WinGet\Links\ which is on PATH for new
-# shells but might not be on PATH in the current one if winget just
-# ran. Fall back to PATH search; winget's links shim handles forwarding.
-$minisign = Get-Command minisign -ErrorAction SilentlyContinue
-if (-not $minisign) {
-    throw @"
+# Locate the signing tool. minisign (default) is the C reference impl
+# installed via winget; rsign (CI mode) is the Rust port installed via
+# `cargo install rsign2`. Both produce byte-compatible .minisig files.
+$toolBin = Get-Command $Tool -ErrorAction SilentlyContinue
+if (-not $toolBin) {
+    if ($Tool -eq 'minisign') {
+        throw @"
 minisign.exe not found on PATH.
 
 Install it with:
@@ -124,6 +150,23 @@ Install it with:
 
 Close and reopen the terminal so PATH picks up the new exe, then re-run.
 "@
+    } else {
+        throw @"
+rsign not found on PATH.
+
+Install it with:
+    cargo install rsign2 --locked
+
+If running in CI, add an install step before invoking this script.
+"@
+    }
+}
+
+# CI mode pre-flight: rsign needs the passphrase on stdin, which we
+# pipe from $env:MINISIGN_PASSWORD. Refuse to start if it's missing
+# rather than hang on an EOF-stdin read.
+if ($Tool -eq 'rsign' -and [string]::IsNullOrEmpty($env:MINISIGN_PASSWORD)) {
+    throw "Tool 'rsign' requires `$env:MINISIGN_PASSWORD to be set (passphrase piped to stdin)."
 }
 
 # Pre-flight: refuse if any target has an existing .minisig and
@@ -164,31 +207,58 @@ foreach ($p in $installers) {
 }
 Write-Host "  Key:       $KeyPath" -ForegroundColor Cyan
 Write-Host ""
-Write-Host "minisign will prompt for the key password ONCE per file." -ForegroundColor DarkGray
-Write-Host "(Same passphrase for both — minisign doesn't cache it across invocations.)" -ForegroundColor DarkGray
+if ($Tool -eq 'minisign') {
+    Write-Host "minisign will prompt for the key password ONCE per file." -ForegroundColor DarkGray
+    Write-Host "(Same passphrase across files — minisign doesn't cache it across invocations.)" -ForegroundColor DarkGray
+} else {
+    Write-Host "rsign mode: passphrase piped from `$env:MINISIGN_PASSWORD." -ForegroundColor DarkGray
+}
 Write-Host ""
 
-# `-Sm` signs the file in-place (writes <file>.minisig next to it).
-# `-c` and `-t` set the trusted/untrusted comments — the trusted
-# comment is signed and visible to verifiers; we put a build-id in it
+# Sign each installer. The two tools take different argument shapes but
+# produce the same .minisig output. Trusted comment carries a build-id
 # so a sidecar can be tied back to a specific build attempt.
 $signed = @()
 foreach ($p in $installers) {
-    $buildId = "offspring-{0}-{1}" -f `
-        (Split-Path $p -Leaf), `
-        (Get-Date -Format "yyyyMMdd-HHmmss")
-    $variant = if ($p -match 'Offspring-Studio-') { "studio" } else { "standard" }
-
-    Write-Host "--- Signing $variant : $(Split-Path $p -Leaf) ---" -ForegroundColor Yellow
-    & $minisign.Source -Sm $p -s $KeyPath `
-        -c "Offspring $variant release build" `
-        -t $buildId
-    if ($LASTEXITCODE -ne 0) {
-        throw "minisign signing failed (exit $LASTEXITCODE) on $p"
+    $leaf = Split-Path $p -Leaf
+    $buildId = "offspring-{0}-{1}" -f $leaf, (Get-Date -Format "yyyyMMdd-HHmmss")
+    $variant = if ($leaf -match 'Offspring-Studio-') {
+        "studio"
+    } elseif ($leaf -match '\.dmg$') {
+        "macos"
+    } else {
+        "standard"
     }
+    $untrusted = "Offspring $variant release build"
+
+    Write-Host "--- Signing $variant : $leaf ---" -ForegroundColor Yellow
+    if ($Tool -eq 'minisign') {
+        # `-Sm` signs the file in-place (writes <file>.minisig next to it).
+        & $toolBin.Source -Sm $p -s $KeyPath -c $untrusted -t $buildId
+        if ($LASTEXITCODE -ne 0) {
+            throw "minisign signing failed (exit $LASTEXITCODE) on $p"
+        }
+    } else {
+        # rsign reads the passphrase from stdin when `-W` is set. Pipe
+        # $env:MINISIGN_PASSWORD followed by a newline so it terminates
+        # the read cleanly. -x is the explicit sidecar path so we don't
+        # depend on rsign's default-path behaviour matching minisign's.
+        $sigPath = "$p.minisig"
+        $env:MINISIGN_PASSWORD + "`n" | & $toolBin.Source sign `
+            -W `
+            -s $KeyPath `
+            -x $sigPath `
+            -t $buildId `
+            -c $untrusted `
+            $p
+        if ($LASTEXITCODE -ne 0) {
+            throw "rsign signing failed (exit $LASTEXITCODE) on $p"
+        }
+    }
+
     $sig = "$p.minisig"
     if (-not (Test-Path $sig)) {
-        throw "minisign reported success but $sig wasn't produced"
+        throw "$Tool reported success but $sig wasn't produced"
     }
     $signed += $sig
     Write-Host ""

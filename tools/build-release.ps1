@@ -37,6 +37,7 @@ param(
     [string]$Version,
     [switch]$Release,       # bump patch and strip -NNNN suffix
     [switch]$SkipInstall,   # skip `npm ci` (faster on repeat builds)
+    [switch]$NoBump,        # use current package.json version verbatim (CI mode)
     [switch]$OpenOutput     # open Explorer on installer/dist/ when done
 )
 
@@ -46,20 +47,32 @@ $repoRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
 Push-Location $repoRoot
 try {
     # --- 0. version bump ------------------------------------------------
-    # Always run the bumper. Even an explicit -Version arg flows through
-    # it so all five files (package.json, both Cargo.tomls, tauri.conf,
-    # offspring.iss) plus package-lock.json end up in lockstep.
-    $bumper = Join-Path $repoRoot "tools\bump-version.ps1"
-    Write-Host ""
-    Write-Host "[0/5] bump-version..." -ForegroundColor Yellow
-    if ($Version) {
-        $Version = & $bumper -Set $Version
-    } elseif ($Release) {
-        $Version = & $bumper -Release
+    # Locally, always run the bumper so all six version-bearing files end
+    # up in lockstep. In CI (-NoBump), the version in package.json is
+    # whatever was committed and we use it verbatim — never bump during
+    # an automated build, or every push races the counter.
+    if ($NoBump) {
+        if ($Version -or $Release) {
+            throw "-NoBump is incompatible with -Version / -Release"
+        }
+        Write-Host ""
+        Write-Host "[0/5] bump-version (skipped - reading package.json)..." -ForegroundColor DarkGray
+        $pkg = Get-Content (Join-Path $repoRoot "package.json") -Raw | ConvertFrom-Json
+        $Version = $pkg.version
+        if (-not $Version) { throw "package.json has no version field" }
     } else {
-        $Version = & $bumper
+        $bumper = Join-Path $repoRoot "tools\bump-version.ps1"
+        Write-Host ""
+        Write-Host "[0/5] bump-version..." -ForegroundColor Yellow
+        if ($Version) {
+            $Version = & $bumper -Set $Version
+        } elseif ($Release) {
+            $Version = & $bumper -Release
+        } else {
+            $Version = & $bumper
+        }
+        if ($LASTEXITCODE -ne 0 -or -not $Version) { throw "bump-version.ps1 failed" }
     }
-    if ($LASTEXITCODE -ne 0 -or -not $Version) { throw "bump-version.ps1 failed" }
     # bump-version returns the new semver via stdout; the four-numeric
     # MSIX form is what build-msix.ps1 wants. Derive it here from the
     # new semver (same logic as inside the bumper, kept duplicated to
