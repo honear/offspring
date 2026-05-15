@@ -4,16 +4,17 @@
 
 # Offspring
 
-**Right-click convert videos & images with FFmpeg — from anywhere in Windows.**
+**Right-click convert videos & images with FFmpeg — from anywhere in Windows or macOS.**
 
 </div>
 
 ---
 
-Offspring is a tiny Windows 11 app that adds video/image conversion shortcuts
-to your right-click menu. Drop a `.mov` on a shortcut, get a trimmed-down
-`.mp4` or a Discord-ready `.gif` in the same folder. No windows to open, no
-command lines, no upload to a web service.
+Offspring is a tiny cross-platform app (Windows 11 + macOS) that adds
+video/image conversion shortcuts to your right-click menu. Drop a `.mov`
+on a shortcut, get a trimmed-down `.mp4` or a Discord-ready `.gif` in
+the same folder. No windows to open, no command lines, no upload to a
+web service.
 
 <p align="center">
   <img src="docs/screenshots/contextmenu.png" alt="Right-click menu with Offspring preset entries" width="420" />
@@ -43,15 +44,27 @@ command lines, no upload to a web service.
 
 ## Install
 
-Grab the latest `Offspring-Setup-<version>.exe` from the
-[Releases page](https://github.com/second-march/offspring/releases/latest) and run
-it. The installer is admin-only — that keeps every install in the same scope
-(no stacked per-user + machine copies) and lets it trust the shell-extension
-signing cert so the modern Windows 11 menu toggle works without prompts.
+Grab the latest installer from the
+[Releases page](https://github.com/second-march/offspring/releases/latest):
 
-On first install, Offspring offers to download the LGPL essentials FFmpeg
-build (~80 MB) into `%LOCALAPPDATA%\Offspring\ffmpeg\`. You can also point
-the app at a pre-existing FFmpeg install from the Settings tab.
+- **Windows**: `Offspring-Setup-<version>.exe` (Standard) or
+  `Offspring-Studio-Setup-<version>.exe` (no-network variant — see
+  [SECURITY.md](./SECURITY.md)). Standard is a per-user install; no
+  admin prompt unless you're upgrading from a pre-0.4.4 per-machine
+  build.
+- **macOS**: `Offspring_<version>_universal.dmg`. Drag to Applications.
+  Signed + notarized; Gatekeeper allows it on first launch. To enable
+  the Finder right-click integration, after first launch open
+  **System Settings → Keyboard → Keyboard Shortcuts → Services →
+  Files and Folders** and tick **Offspring…**.
+
+On first launch, Offspring downloads a small FFmpeg build into the
+per-user data folder if one isn't already on `PATH` — gyan.dev's LGPL
+essentials build on Windows (~80 MB to
+`%LOCALAPPDATA%\Offspring\ffmpeg\`), evermeet.cx's universal static
+build on macOS (to `~/Library/Application Support/Offspring/ffmpeg/`).
+You can also point the app at a pre-existing FFmpeg install from the
+Settings tab (e.g. `/opt/homebrew/bin/ffmpeg` for a Homebrew install).
 
 Updates: Offspring **never pings GitHub on its own**. It only checks
 for updates when you click **Settings → Check for updates**, and even
@@ -67,10 +80,12 @@ installer whose signature is missing or doesn't match. See
 ## FFmpeg licensing
 
 Offspring does **not** bundle FFmpeg. It invokes whatever FFmpeg lives in
-`%LOCALAPPDATA%\Offspring\ffmpeg\` (downloaded on demand) or the path you
-configured in Settings. FFmpeg is © the FFmpeg developers, licensed under
-the [LGPL v2.1+](https://www.ffmpeg.org/legal.html), and its source is
-available at <https://ffmpeg.org/download.html>.
+its per-user data folder (downloaded on demand —
+`%LOCALAPPDATA%\Offspring\ffmpeg\` on Windows,
+`~/Library/Application Support/Offspring/ffmpeg/` on macOS) or the path
+you configured in Settings. FFmpeg is © the FFmpeg developers, licensed
+under the [LGPL v2.1+](https://www.ffmpeg.org/legal.html), and its source
+is available at <https://ffmpeg.org/download.html>.
 
 Because Offspring calls FFmpeg as a separate executable (no linking), the
 LGPL does not propagate to Offspring's own code. Offspring itself is MIT.
