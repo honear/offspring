@@ -1,0 +1,23 @@
+[package]
+name = "offspring-sign"
+version = "0.1.0"
+edition = "2021"
+description = "Headless minisign signer for Offspring CI"
+publish = false
+
+# Standalone Cargo package. Not part of the offspring workspace because
+# (a) it has nothing to do with the Tauri app's runtime concerns and
+# (b) keeping it out of the workspace means a `cargo build` in src-tauri
+# doesn't pull this in and grow the main binary's compile graph.
+#
+# Built on demand in CI via `cargo install --path tools/offspring-sign`.
+# Locally a developer can `cargo run -p offspring-sign --` for parity
+# with the CI invocation.
+
+[dependencies]
+# Pure-Rust minisign implementation. We use its high-level `sign()` +
+# `SecretKey::from_file` API to avoid every problem we had piping
+# passwords to the rsign2 CLI: this crate takes the password as a
+# normal Option<String> argument, so we read it from the env var and
+# pass it directly with zero stdin / TTY / encoding gymnastics.
+minisign = "0.7"

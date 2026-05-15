@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- WKWebView needs JIT + writable executable memory to run JS. -->
+    <key>com.apple.security.cs.allow-jit</key>
+    <true/>
+    <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+    <true/>
+
+    <!-- We spawn ffmpeg (Homebrew install, not bundled). Hardened
+         Runtime doesn't block external subprocesses, but disabling
+         library validation lets us tolerate ffmpeg variants the user
+         might point us at via Settings → FFmpeg path. -->
+    <key>com.apple.security.cs.disable-library-validation</key>
+    <true/>
+
+    <!-- Tauri's asset:// protocol needs to read user-selected files
+         outside the sandbox. We're not sandboxed (Developer ID, not
+         MAS), but these are belt-and-suspenders for future-proofing. -->
+    <key>com.apple.security.files.user-selected.read-write</key>
+    <true/>
+</dict>
+</plist>

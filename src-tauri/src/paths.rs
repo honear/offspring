@@ -42,7 +42,18 @@ pub fn settings_path() -> Result<PathBuf> {
 }
 
 pub fn ffmpeg_managed_path() -> Result<PathBuf> {
-    Ok(local_data_dir()?.join("ffmpeg").join("bin").join("ffmpeg.exe"))
+    // Windows: %LOCALAPPDATA%\Offspring\ffmpeg\bin\ffmpeg.exe
+    //   (matches gyan.dev's archive layout — top-level dir holds bin/)
+    // macOS:   ~/Library/Application Support/Offspring/ffmpeg/bin/ffmpeg
+    //   (we mirror the bin/ subdir for consistency even though the
+    //   Mac archive is just a flat binary — bootstrap extracts it
+    //   into bin/ for symmetry across platforms)
+    let base = local_data_dir()?.join("ffmpeg").join("bin");
+    #[cfg(windows)]
+    let exe = base.join("ffmpeg.exe");
+    #[cfg(not(windows))]
+    let exe = base.join("ffmpeg");
+    Ok(exe)
 }
 
 /// Scratch directory for encode intermediates — palette PNGs, concat
@@ -62,6 +73,11 @@ pub fn icons_dir() -> Result<PathBuf> {
     Ok(p)
 }
 
+/// Windows SendTo folder. macOS has no equivalent (the conceptual
+/// analogue is the Services menu, populated via Info.plist instead
+/// of by writing .lnk shortcuts to a folder). Gated to Windows so
+/// the macOS build doesn't carry a dead helper.
+#[cfg(windows)]
 pub fn sendto_dir() -> Result<PathBuf> {
     let mut p = dirs::data_dir().context("no APPDATA directory")?;
     p.push("Microsoft");
@@ -74,6 +90,7 @@ pub fn sendto_dir() -> Result<PathBuf> {
 /// recognize our own shortcuts by a shared "Offspring - " filename prefix, but
 /// the user asked for shorter names. Without a marker we can't tell our .lnks
 /// apart from unrelated SendTo entries, so we track them ourselves.
+#[cfg(windows)]
 pub fn sendto_manifest_path() -> Result<PathBuf> {
     Ok(data_dir()?.join("sendto-manifest.json"))
 }

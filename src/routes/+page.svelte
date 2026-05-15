@@ -22,6 +22,13 @@
   // studio-stub errors if mismatched).
   let buildVariant = $state<"standard" | "studio">("standard");
   let isStudio = $derived(buildVariant === "studio");
+  // Platform marker. Defaults to "windows" until the async lookup
+  // resolves — first paint on Windows therefore shows the right UI
+  // immediately; first paint on Mac briefly shows the Windows-flavoured
+  // text before the swap. Acceptable given the lookup is a single
+  // Tauri command that resolves in <10ms.
+  let platform = $state<"windows" | "macos" | "linux">("windows");
+  let isMac = $derived(platform === "macos");
   let tab = $state<"presets" | "settings">("presets");
   let dirty = $state(false);
   let saving = $state(false);
@@ -452,6 +459,7 @@
     // network, just a constant lookup in Rust) and tolerant of older
     // builds without this command — fall back to "standard".
     try { buildVariant = await api.getBuildVariant(); } catch { buildVariant = "standard"; }
+    try { platform = await api.getPlatform(); } catch { platform = "windows"; }
     if (!selectedId && !selectedToolId && presets.length > 0) selectedId = presets[0].id;
     // First-run guidance: if FFmpeg is missing on app open, surface the
     // Settings tab directly so the big "Download FFmpeg" button is the
@@ -860,7 +868,7 @@
                   p.enabled = (e.currentTarget as HTMLInputElement).checked;
                   dirty = true;
                 }}
-                title="Show in SendTo menu"
+                title={isMac ? "Enable this preset" : "Show in SendTo menu"}
               />
               <span class="fmt-tag {p.format}">{p.format.toUpperCase()}</span>
               <span class="preset-name">{p.name}</span>
@@ -1496,7 +1504,9 @@
               <button class="danger" onclick={() => deletePreset(selected!)}>Delete</button>
             </div>
           </div>
-          <p class="muted tiny">Shortcut appears in right-click → Send To as <code>Offspring - {selected.name}.lnk</code></p>
+          {#if !isMac}
+            <p class="muted tiny">Shortcut appears in right-click → Send To as <code>Offspring - {selected.name}.lnk</code></p>
+          {/if}
 
           <div class="fields">
             <FormatFields preset={selected} />
@@ -1551,11 +1561,22 @@
           </div>
         {:else if !ffmpeg.found && !dl.active && dl.phase !== "done"}
           <div class="dl-box">
-            <p class="tiny muted">
-              No FFmpeg found. Download the LGPL essentials build (~80 MB) from
-              <a href="https://www.gyan.dev/ffmpeg/builds/" target="_blank" rel="noreferrer">gyan.dev</a>
-              into <code>%LOCALAPPDATA%\Offspring\ffmpeg\</code>.
-            </p>
+            {#if isMac}
+              <p class="tiny muted">
+                No FFmpeg found. Offspring will download a universal
+                static build from
+                <a href="https://evermeet.cx/ffmpeg/" target="_blank" rel="noreferrer">evermeet.cx</a>
+                into <code>~/Library/Application Support/Offspring/ffmpeg/</code>.
+                Or set a custom path above (e.g.
+                <code>/opt/homebrew/bin/ffmpeg</code> for a Homebrew install).
+              </p>
+            {:else}
+              <p class="tiny muted">
+                No FFmpeg found. Download the LGPL essentials build (~80 MB) from
+                <a href="https://www.gyan.dev/ffmpeg/builds/" target="_blank" rel="noreferrer">gyan.dev</a>
+                into <code>%LOCALAPPDATA%\Offspring\ffmpeg\</code>.
+              </p>
+            {/if}
             <button class="primary" onclick={startDownloadFfmpeg}>Download FFmpeg</button>
             {#if dl.error}
               <p class="tiny err">✕ {dl.error}</p>
@@ -1587,7 +1608,16 @@
         {/if}
       </div>
 
-      {#if isStudio}
+      {#if isMac}
+        <div class="card">
+          <h3>Finder integration</h3>
+          <p class="muted tiny" style="margin-top: 6px;">
+            Finder right-click integration on macOS is coming in a
+            future update. For now, drag files onto the Offspring
+            window to queue them for conversion.
+          </p>
+        </div>
+      {:else if isStudio}
         <div class="card">
           <h3>Right-click menu</h3>
           <p class="muted tiny" style="margin-top: 6px;">
@@ -1722,13 +1752,25 @@
       <div class="card">
         <h3>Data folders</h3>
         <p class="muted tiny">
-          Presets & settings: <code>%APPDATA%\Offspring</code>.
-          Logs: <code>%LOCALAPPDATA%\Offspring\debug.log</code>
+          {#if isMac}
+            Presets & settings: <code>~/Library/Application Support/Offspring</code>.
+            Logs: <code>~/Library/Application Support/Offspring/debug.log</code>
+          {:else}
+            Presets & settings: <code>%APPDATA%\Offspring</code>.
+            Logs: <code>%LOCALAPPDATA%\Offspring\debug.log</code>
+          {/if}
         </p>
         <div class="row" style="margin-top: 12px;">
           <button onclick={api.openDataFolder}>Open data folder</button>
-          <button onclick={api.openLogFolder} title="Opens %LOCALAPPDATA%\Offspring with debug.log selected">Open log folder</button>
-          <button onclick={api.syncIntegrations}>Re-sync right-click menus</button>
+          <button
+            onclick={api.openLogFolder}
+            title={isMac
+              ? "Reveals debug.log in Finder"
+              : "Opens %LOCALAPPDATA%\\Offspring with debug.log selected"}
+          >Open log folder</button>
+          {#if !isMac}
+            <button onclick={api.syncIntegrations}>Re-sync right-click menus</button>
+          {/if}
         </div>
       </div>
     </section>

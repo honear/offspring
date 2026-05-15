@@ -158,6 +158,9 @@ pub fn run() {
             commands::ffmpeg_status,
             commands::download_ffmpeg,
             commands::get_build_variant,
+            commands::get_platform,
+            commands::pick_run_preset,
+            commands::pick_run_tool,
             commands::get_custom_last,
             commands::save_custom_last,
             commands::get_trim_last,
@@ -215,6 +218,36 @@ pub fn run() {
                     let _ = presets::save_presets(&ps);
                     let settings = presets::load_settings().unwrap_or_default();
                     let _ = integration::sync_all(&ps, &settings);
+                }
+            }
+
+            // macOS Services integration. Registers our service provider
+            // with NSApp so the "Offspring…" entry in Finder's
+            // right-click → Services submenu dispatches into the app.
+            // Idempotent + main-thread-only; safe to call from setup().
+            #[cfg(target_os = "macos")]
+            {
+                integration::services_mac::register(&handle);
+            }
+
+            // Auto-download ffmpeg in the background when nothing is
+            // resolvable — no user-configured path in settings, no
+            // managed copy already installed, and no `ffmpeg` on PATH.
+            // Standard build only; Studio explicitly ships with no
+            // outbound network calls. The download runs on a background
+            // thread (spawn_download returns immediately), so the main
+            // window comes up without waiting on the network. Progress
+            // surfaces through the `ffmpeg-download` event the Settings
+            // UI already listens for; an in-progress encode is still
+            // gated on ffmpeg being present, so the user gets a clear
+            // "not ready yet" error if they try to convert before the
+            // background install finishes.
+            #[cfg(not(feature = "studio"))]
+            {
+                let settings = presets::load_settings().unwrap_or_default();
+                if ffmpeg::resolve_ffmpeg(&settings).is_err() {
+                    dlog!("auto-download: ffmpeg unresolvable, kicking off bootstrap");
+                    bootstrap::spawn_download(handle.clone());
                 }
             }
 

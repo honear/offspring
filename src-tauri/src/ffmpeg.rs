@@ -146,7 +146,23 @@ fn hide_console(cmd: &mut Command) -> &mut Command {
     cmd
 }
 
-/// Resolve which `ffmpeg.exe` to invoke for this encode session.
+/// Filename of the ffmpeg binary on this platform. Windows ships as
+/// `ffmpeg.exe`; everywhere else it's a bare `ffmpeg` with the
+/// executable bit set.
+#[cfg(windows)]
+const FFMPEG_FILENAME: &str = "ffmpeg.exe";
+#[cfg(not(windows))]
+const FFMPEG_FILENAME: &str = "ffmpeg";
+
+/// Filename of the ffprobe binary on this platform. We derive its path
+/// from `ffmpeg`'s sibling, so it has to match what the bootstrap
+/// downloader writes next to ffmpeg.
+#[cfg(windows)]
+const FFPROBE_FILENAME: &str = "ffprobe.exe";
+#[cfg(not(windows))]
+const FFPROBE_FILENAME: &str = "ffprobe";
+
+/// Resolve which ffmpeg binary to invoke for this encode session.
 ///
 /// Order of precedence:
 ///   1. **Explicit user override** from `settings.ffmpeg_path`. If
@@ -157,9 +173,10 @@ fn hide_console(cmd: &mut Command) -> &mut Command {
 ///      bundled `ffmpeg.exe` getting picked up off PATH and shadowing
 ///      the build the user actually wants).
 ///   2. **Managed bundled FFmpeg** at
-///      `%LOCALAPPDATA%\Offspring\ffmpeg\bin\ffmpeg.exe` — what the
-///      first-run download writes into.
-///   3. **PATH lookup** for `ffmpeg.exe` as a last resort. Works for
+///      `%LOCALAPPDATA%\Offspring\ffmpeg\bin\ffmpeg.exe` (Windows) or
+///      `~/Library/Application Support/Offspring/ffmpeg/bin/ffmpeg`
+///      (macOS) — what the first-run download writes into.
+///   3. **PATH lookup** for `ffmpeg` as a last resort. Works for
 ///      developers with a system FFmpeg, BUT can land on a stripped-
 ///      down build from another app (ImageMagick, OBS, etc.) that's
 ///      missing filters Offspring needs. That's why the explicit-
@@ -168,8 +185,9 @@ fn hide_console(cmd: &mut Command) -> &mut Command {
 ///
 /// Validation for the explicit-override path:
 ///   * Must point at a regular file (not a directory).
-///   * Filename must be `ffmpeg.exe` (case-insensitive). Custom builds
-///     renamed to `ffmpeg-static.exe` etc. fall out — rare in practice,
+///   * Filename must be the platform's ffmpeg binary name (case-
+///     insensitive on Windows, case-sensitive on Unix). Custom builds
+///     renamed to `ffmpeg-static` etc. fall out — rare in practice,
 ///     and a clear error here is better than a confusing subprocess
 ///     failure later when the binary doesn't accept ffmpeg flags.
 pub fn resolve_ffmpeg(settings: &Settings) -> Result<PathBuf> {
@@ -181,21 +199,32 @@ pub fn resolve_ffmpeg(settings: &Settings) -> Result<PathBuf> {
                 bail!(
                     "The FFmpeg path you set in Settings doesn't point at a file: \
                      {} — clear the path to use the bundled FFmpeg, or pick the \
-                     real ffmpeg.exe.",
-                    p.display()
+                     real {} binary.",
+                    p.display(),
+                    FFMPEG_FILENAME
                 );
             }
-            let is_ffmpeg_exe = p
+            let is_ffmpeg_bin = p
                 .file_name()
                 .and_then(|n| n.to_str())
-                .map(|s| s.eq_ignore_ascii_case("ffmpeg.exe"))
+                .map(|s| {
+                    // Windows: case-insensitive (FAT/NTFS legacy).
+                    // Unix: case-sensitive (HFS+/APFS treat Ffmpeg
+                    // and ffmpeg as different files).
+                    #[cfg(windows)]
+                    { s.eq_ignore_ascii_case(FFMPEG_FILENAME) }
+                    #[cfg(not(windows))]
+                    { s == FFMPEG_FILENAME }
+                })
                 .unwrap_or(false);
-            if !is_ffmpeg_exe {
+            if !is_ffmpeg_bin {
                 bail!(
-                    "The FFmpeg path you set in Settings isn't named ffmpeg.exe: \
-                     {} — pick the actual ffmpeg.exe file, or clear the path to \
+                    "The FFmpeg path you set in Settings isn't named {}: \
+                     {} — pick the actual {} file, or clear the path to \
                      use the bundled FFmpeg.",
-                    p.display()
+                    FFMPEG_FILENAME,
+                    p.display(),
+                    FFMPEG_FILENAME
                 );
             }
             return Ok(p);
@@ -210,13 +239,22 @@ pub fn resolve_ffmpeg(settings: &Settings) -> Result<PathBuf> {
     if let Some(p) = which("ffmpeg") {
         return Ok(p);
     }
-    bail!("ffmpeg.exe not found. Click \"Download FFmpeg\" in Settings, or point Offspring at an existing ffmpeg.exe.")
+    bail!(
+        "{} not found. Click \"Download FFmpeg\" in Settings, or point Offspring at an existing {}.",
+        FFMPEG_FILENAME, FFMPEG_FILENAME
+    )
 }
 
 fn which(name: &str) -> Option<PathBuf> {
     let paths = std::env::var_os("PATH")?;
     for dir in std::env::split_paths(&paths) {
+        // On Windows, PATH entries are bare names; we append .exe so
+        // candidates like C:\ffmpeg\ffmpeg become C:\ffmpeg\ffmpeg.exe.
+        // On Unix, binaries don't carry an extension.
+        #[cfg(windows)]
         let candidate = dir.join(format!("{name}.exe"));
+        #[cfg(not(windows))]
+        let candidate = dir.join(name);
         if candidate.exists() {
             return Some(candidate);
         }
@@ -794,7 +832,20 @@ pub fn encode_file(
         }
         Format::Mp4 => {
             let filter = build_filter_chain(preset);
+            // Hardware encoder selection. The `use_cuda` flag is a
+            // historical name — semantically it means "use the platform's
+            // hardware H.264 encoder if available." On Windows that maps
+            // to h264_nvenc (NVIDIA). On macOS the equivalent would be
+            // h264_videotoolbox, but that takes a different parameter
+            // set (no `-preset`/`-crf`, uses `-q:v` 0-100 instead), so
+            // wiring it up properly requires a parameter-mapping branch
+            // we haven't built yet. Until then, Mac silently falls back
+            // to libx264 even with use_cuda=true — encodes succeed, just
+            // CPU-bound. Tracked as a Phase 2 macOS port item.
+            #[cfg(windows)]
             let codec = if preset.use_cuda.unwrap_or(false) { "h264_nvenc" } else { "libx264" };
+            #[cfg(not(windows))]
+            let codec = "libx264";
             let preset_speed = preset.preset_speed.clone().unwrap_or_else(|| "medium".into());
             let crf = preset.crf.unwrap_or(23);
             let abr = preset.audio_bitrate.clone().unwrap_or_else(|| "128k".into());
@@ -1542,7 +1593,7 @@ fn encode_gif_once(
 
 pub fn probe_duration(ffmpeg: &Path, input: &Path) -> Option<f64> {
     // Derive ffprobe from ffmpeg path
-    let probe = ffmpeg.with_file_name("ffprobe.exe");
+    let probe = ffmpeg.with_file_name(FFPROBE_FILENAME);
     let probe = if probe.exists() { probe } else { return None };
     let mut probe_cmd = Command::new(probe);
     probe_cmd
@@ -1572,7 +1623,7 @@ pub struct VideoProbe {
 /// or the file has no video stream we can read — the caller falls back
 /// to reasonable defaults.
 pub fn probe_video(ffmpeg: &Path, input: &Path) -> VideoProbe {
-    let probe = ffmpeg.with_file_name("ffprobe.exe");
+    let probe = ffmpeg.with_file_name(FFPROBE_FILENAME);
     if !probe.exists() {
         return VideoProbe::default();
     }
@@ -1626,7 +1677,7 @@ pub fn probe_video(ffmpeg: &Path, input: &Path) -> VideoProbe {
 /// missing or the call fails, so the fallback (video-only merge)
 /// always runs rather than silently dropping to a broken audio graph.
 fn has_audio_stream(ffmpeg: &Path, input: &Path) -> bool {
-    let probe = ffmpeg.with_file_name("ffprobe.exe");
+    let probe = ffmpeg.with_file_name(FFPROBE_FILENAME);
     if !probe.exists() {
         return false;
     }
@@ -2106,7 +2157,7 @@ pub fn derive_overlay_preset(ffmpeg: &Path, input: &Path, cfg: OverlayConfig) ->
 /// attempts fail — caller should treat the trim as a no-op or error
 /// rather than silently producing a zero-length file.
 pub fn probe_total_frames(ffmpeg: &Path, input: &Path) -> Option<u64> {
-    let probe = ffmpeg.with_file_name("ffprobe.exe");
+    let probe = ffmpeg.with_file_name(FFPROBE_FILENAME);
     if !probe.exists() {
         return None;
     }

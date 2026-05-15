@@ -1,6 +1,17 @@
 <script lang="ts">
   import type { Preset, ImageCodec } from "$lib/types";
+  import { getPlatform } from "$lib/api";
   let { preset }: { preset: Preset } = $props();
+
+  // Platform check, fetched once and cached. Drives whether the NVENC
+  // checkbox renders — Mac silently falls back to libx264 regardless
+  // of the toggle's value, so showing the checkbox there would be
+  // honestly misleading. Defaults to "windows" until the async call
+  // resolves so first-paint on Windows isn't a flash of missing UI.
+  let platform = $state<"windows" | "macos" | "linux">("windows");
+  $effect(() => {
+    getPlatform().then((p) => { platform = p; });
+  });
 
   // Per-codec quality field metadata: label, range, default, and
   // whether the field is a quality slider or a compression-level dial
@@ -304,18 +315,20 @@
         placeholder="128k"
       />
     </div>
-    <div class="full">
-      <label class="inline">
-        <input
-          type="checkbox"
-          checked={preset.use_cuda ?? false}
-          onchange={(e) => {
-            preset.use_cuda = (e.currentTarget as HTMLInputElement).checked;
-          }}
-        />
-        Use NVIDIA NVENC (h264_nvenc) if available
-      </label>
-    </div>
+    {#if platform === "windows"}
+      <div class="full">
+        <label class="inline">
+          <input
+            type="checkbox"
+            checked={preset.use_cuda ?? false}
+            onchange={(e) => {
+              preset.use_cuda = (e.currentTarget as HTMLInputElement).checked;
+            }}
+          />
+          Use NVIDIA NVENC (h264_nvenc) if available
+        </label>
+      </div>
+    {/if}
   </div>
 {/if}
 

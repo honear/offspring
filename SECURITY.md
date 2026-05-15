@@ -62,20 +62,24 @@ in short:
 ## Privacy / network connections
 
 Offspring makes **no analytics, telemetry, or "phone-home" calls**.
-It also makes **no automatic outbound requests at all** — every
-network call is explicitly user-initiated. The complete list:
+The Standard variant makes a small number of outbound requests for
+its core function (FFmpeg fetch, update check); the Studio variant
+makes **zero** outbound requests of any kind. The complete list for
+Standard:
 
 | When | Where | Why |
 |---|---|---|
 | When the user clicks **Settings → Check for updates** | `https://api.github.com/repos/second-march/offspring/releases/latest` | Update check. Failures surface as "couldn't reach the update server" only on the manual path. The request carries the running version in the `User-Agent` header for release-page traffic stats; no other identifying data. |
 | When the user clicks **Download** in the update banner that follows a successful check | GitHub-owned download host (one of `github.com`, `objects.githubusercontent.com`, `release-assets.githubusercontent.com`) | Downloads the installer .exe and its `.minisig` sidecar. Refuses to fetch from any other host. |
-| When the user clicks **Download FFmpeg** in Settings | `https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip` and the matching `.sha256` sidecar | One-time FFmpeg fetch. The installer **never** fetches FFmpeg automatically — the user opts in from inside the running app. After that, no further gyan.dev traffic. |
+| At **first launch** on Standard, if no FFmpeg is resolvable (no path set in Settings, no managed copy installed, no `ffmpeg` on `PATH`) | Windows: `https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip` and the matching `.sha256` sidecar. macOS: `https://evermeet.cx/ffmpeg/info/{ffmpeg,ffprobe}/release` followed by the versioned `.zip` URL each info document points to. | One-time FFmpeg + FFprobe fetch. Runs once when nothing else is available. After the binaries are installed under the per-user data folder, no further evermeet.cx / gyan.dev traffic on subsequent launches. Users who already have FFmpeg on `PATH` (e.g. Homebrew on macOS, Chocolatey on Windows) never hit this path — Offspring uses the existing binary and does not auto-download. Users who want to bypass the auto-fetch entirely can install Studio instead, or set a custom FFmpeg path in Settings before first launch. |
 
-That's the complete list. **No traffic at launch, no background
-pings, no scheduled checks**, no crash reports, no usage stats, no
-third-party SDKs, no remote config, no A/B tests. The in-app debug
-log lives only on the user's machine
-(`%LOCALAPPDATA%\Offspring\debug.log`) and is never uploaded.
+That's the complete list. **No traffic at launch beyond the
+conditional first-run FFmpeg fetch, no background pings, no scheduled
+checks**, no crash reports, no usage stats, no third-party SDKs, no
+remote config, no A/B tests. The in-app debug log lives only on the
+user's machine (Windows: `%LOCALAPPDATA%\Offspring\debug.log`; macOS:
+`~/Library/Application Support/Offspring/debug.log`) and is never
+uploaded.
 
 ## Build variants: Offspring and Offspring Studio
 
@@ -91,7 +95,7 @@ Each release ships two installers built from the same source tree:
 | Win11 modern (top-level) right-click menu | Yes (default on) | **No** |
 | Self-signed cert in `CurrentUser\TrustedPeople` | Yes | **No, never** |
 | Shipped shell-extension DLL + MSIX packages | Yes | **No** |
-| Compile-time-included FFmpeg downloader | Yes (user-initiated) | **No (code compiled out)** |
+| Compile-time-included FFmpeg downloader | Yes (auto on first launch if not present, or manual via Settings) | **No (code compiled out)** |
 | Compile-time-included in-app updater | Yes (minisign-verified) | **No (code compiled out)** |
 
 Studio's "No" rows are not feature toggles. The Rust code is gated behind a Cargo feature flag (`studio`); building with `--features studio` *literally removes* the HTTP modules (`bootstrap.rs`, `updates.rs`) and the cert/MSIX integration paths (`modern_menu.rs`) from the compiled binary. The studio binary contains no code path that calls `gyan.dev`, `github.com`, or `certutil.exe`. The two variants can coexist on the same Windows account — separate AppIds, separate install dirs, separate data folders, separate registry namespaces.
@@ -147,8 +151,13 @@ proceeding with the per-user install.
   key. The in-app updater refuses to launch any installer whose
   signature is missing or doesn't verify against the pinned public
   key in `src-tauri/src/updates.rs`.
-- The FFmpeg download is verified against gyan.dev's published
-  SHA-256 sidecar before extraction.
+- The FFmpeg download is integrity-checked before extraction. On
+  Windows, the gyan.dev archive is verified against its published
+  SHA-256 sidecar (constant-time comparison). On macOS, the SHA-256
+  is pulled from evermeet.cx's info JSON endpoint and verified the
+  same way when present; if the field is absent in a given response
+  Offspring falls back to TLS-only and surfaces the gap to the user
+  through the progress event log rather than failing silently.
 - Update redirect targets are checked against an allowlist of
   GitHub-owned download hosts before any byte is fetched.
 - Subprocesses (FFmpeg, offspring.exe, PowerShell scripts) are

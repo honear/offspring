@@ -1,6 +1,6 @@
 [package]
 name = "offspring"
-version = "0.4.4-b0008"
+version = "0.5.0-b0002"
 description = "Offspring â€” right-click convert videos/images with FFmpeg"
 authors = ["Second March"]
 edition = "2021"
@@ -56,13 +56,7 @@ serde_json = "1"
 clap = { version = "4", features = ["derive"] }
 dirs = "5"
 anyhow = "1"
-mslnk = "0.1"
 thiserror = "1"
-# Windows registry access for the Explorer right-click submenu. We write a
-# per-user HKCU\Software\Classes\*\shell\Offspring tree with an
-# ExtendedSubCommandsKey pointing at per-preset verbs. See
-# integration/context_menu.rs.
-winreg = "0.55"
 # FFmpeg bootstrap: download the LGPL essentials zip from gyan.dev and
 # unpack it under %LOCALAPPDATA%\Offspring\ffmpeg\. ureq keeps the TLS
 # stack pure-Rust (rustls) so the installer stays self-contained.
@@ -76,6 +70,42 @@ zip  = { version = "2",  default-features = false, features = ["deflate"] }
 # noticeably.
 sha2 = "0.10"
 minisign-verify = "0.2"
+
+# Windows-only dependencies. Both `winreg` and `mslnk` ship with
+# their own `compile_error!` / `os::windows::*` imports and refuse to
+# compile on non-Windows targets. Gating them at the manifest level
+# means `cargo check --target aarch64-apple-darwin` doesn't pull
+# them in at all, so the macOS build never sees the Windows-side
+# code.
+#
+# Consumers:
+#   - winreg: integration/context_menu.rs (HKCU\Software\Classes
+#     writes for the classic right-click submenu)
+#   - mslnk:  integration/sendto.rs       (SendTo folder shortcuts)
+#
+# Both consuming modules are also #[cfg(windows)]-gated at the mod
+# declaration so the rest of the tree doesn't reference them at all
+# on macOS.
+[target.'cfg(windows)'.dependencies]
+mslnk = "0.1"
+winreg = "0.55"
+
+# macOS-only dependencies. objc2 + its Foundation/AppKit bindings let
+# us declare a custom Objective-C class for the NSServices provider
+# (integration/services_mac.rs). The provider receives "Offspring…"
+# right-click invocations from Finder, reads the file URLs out of the
+# system pasteboard, and routes them into Tauri's event bus where the
+# picker window picks them up. None of this is needed on Windows where
+# the right-click flow is registry/MSIX-based instead.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.5"
+# objc2-foundation gates its types behind features. The minimum we
+# need for services_mac.rs: NSString (comment lookup), NSArray (iter
+# over pasteboard items), NSDictionary (msg_send! type parameter),
+# NSObject (base class), NSThread (MainThreadMarker plumbing).
+objc2-foundation = { version = "0.2", features = ["NSString", "NSArray", "NSDictionary", "NSObject", "NSThread"] }
+# objc2-app-kit gates NSApp / NSPasteboard behind their own features.
+objc2-app-kit = { version = "0.2", features = ["NSApplication", "NSResponder", "NSPasteboard"] }
 
 [profile.release]
 codegen-units = 1

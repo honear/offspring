@@ -50,6 +50,27 @@ param(
     # partial re-sign (e.g. you rebuilt just the studio variant).
     [string]$InstallerPath,
 
+    # Explicit list of files to sign. Overrides version-based discovery
+    # entirely — useful from CI where the artifact set isn't necessarily
+    # the standard+studio Windows pair (e.g. a single .dmg on macOS).
+    [string[]]$Files,
+
+    # Which signing tool to invoke.
+    #   - minisign       : the reference C implementation (jedisct1/minisign).
+    #                      Interactive passphrase prompt via TTY. The local
+    #                      default; what's installed via winget on the dev box.
+    #   - offspring-sign : custom in-tree Rust binary (tools/offspring-sign).
+    #                      Reads MINISIGN_PASSWORD env var directly via the
+    #                      `minisign` crate's API — no TTY, no stdin pipe,
+    #                      no CLI password-parsing nightmares. The CI mode.
+    #
+    # The previous rsign2 attempt is gone: rsign2's CLI has no
+    # stdin-or-env password input (its `-W` flag means "passwordless
+    # key", not "read password from stdin"), so it's structurally
+    # unsuitable for CI without a pseudo-TTY.
+    [ValidateSet('minisign','offspring-sign')]
+    [string]$Tool = 'minisign',
+
     # Force re-signing even if a .minisig already exists. Off by
     # default to prevent accidentally re-signing a build whose bytes
     # have changed since the last signature was made (which would
@@ -68,11 +89,19 @@ if (-not $KeyPath) {
     }
 }
 
-# Build the list of installers to sign. If the caller passed an
-# explicit path we honour it (single-file mode). Otherwise we pick
-# up BOTH variants from package.json's version.
+# Build the list of installers to sign. Resolution order:
+#   1. -Files (explicit array, used from CI for arbitrary artifact sets)
+#   2. -InstallerPath (single-file local override)
+#   3. version-based discovery for both Windows installers (default)
 $installers = @()
-if ($InstallerPath) {
+if ($Files -and $Files.Count -gt 0) {
+    foreach ($f in $Files) {
+        if (-not (Test-Path -LiteralPath $f)) {
+            throw "File to sign not found: $f"
+        }
+        $installers += (Resolve-Path -LiteralPath $f).Path
+    }
+} elseif ($InstallerPath) {
     $installers += (Resolve-Path -LiteralPath $InstallerPath).Path
 } else {
     $pkg = Get-Content (Join-Path $repoRoot "package.json") -Raw | ConvertFrom-Json
@@ -110,13 +139,14 @@ key up offline. See RELEASING.md for details.
 "@
 }
 
-# Locate minisign.exe. winget installs it under
-# %LOCALAPPDATA%\Microsoft\WinGet\Links\ which is on PATH for new
-# shells but might not be on PATH in the current one if winget just
-# ran. Fall back to PATH search; winget's links shim handles forwarding.
-$minisign = Get-Command minisign -ErrorAction SilentlyContinue
-if (-not $minisign) {
-    throw @"
+# Locate the signing tool. minisign (default) is the C reference impl
+# installed via winget; offspring-sign (CI mode) is the in-tree Rust
+# binary at tools/offspring-sign which uses the `minisign` crate
+# directly. Both produce byte-compatible .minisig files.
+$toolBin = Get-Command $Tool -ErrorAction SilentlyContinue
+if (-not $toolBin) {
+    if ($Tool -eq 'minisign') {
+        throw @"
 minisign.exe not found on PATH.
 
 Install it with:
@@ -124,6 +154,23 @@ Install it with:
 
 Close and reopen the terminal so PATH picks up the new exe, then re-run.
 "@
+    } else {
+        throw @"
+offspring-sign not found on PATH.
+
+Build + install it from the repo root with:
+    cargo install --path tools/offspring-sign --locked
+
+In CI, the workflow installs it before invoking this script.
+"@
+    }
+}
+
+# CI mode pre-flight: offspring-sign reads the passphrase from
+# $env:MINISIGN_PASSWORD. Refuse to start if it's missing rather than
+# pass an empty password and get a confusing decrypt error.
+if ($Tool -eq 'offspring-sign' -and [string]::IsNullOrEmpty($env:MINISIGN_PASSWORD)) {
+    throw "Tool 'offspring-sign' requires `$env:MINISIGN_PASSWORD to be set."
 }
 
 # Pre-flight: refuse if any target has an existing .minisig and
@@ -164,31 +211,52 @@ foreach ($p in $installers) {
 }
 Write-Host "  Key:       $KeyPath" -ForegroundColor Cyan
 Write-Host ""
-Write-Host "minisign will prompt for the key password ONCE per file." -ForegroundColor DarkGray
-Write-Host "(Same passphrase for both — minisign doesn't cache it across invocations.)" -ForegroundColor DarkGray
+if ($Tool -eq 'minisign') {
+    Write-Host "minisign will prompt for the key password ONCE per file." -ForegroundColor DarkGray
+    Write-Host "(Same passphrase across files — minisign doesn't cache it across invocations.)" -ForegroundColor DarkGray
+} else {
+    Write-Host "offspring-sign mode: passphrase read from `$env:MINISIGN_PASSWORD." -ForegroundColor DarkGray
+}
 Write-Host ""
 
-# `-Sm` signs the file in-place (writes <file>.minisig next to it).
-# `-c` and `-t` set the trusted/untrusted comments — the trusted
-# comment is signed and visible to verifiers; we put a build-id in it
+# Sign each installer. The two tools take different argument shapes but
+# produce the same .minisig output. Trusted comment carries a build-id
 # so a sidecar can be tied back to a specific build attempt.
 $signed = @()
 foreach ($p in $installers) {
-    $buildId = "offspring-{0}-{1}" -f `
-        (Split-Path $p -Leaf), `
-        (Get-Date -Format "yyyyMMdd-HHmmss")
-    $variant = if ($p -match 'Offspring-Studio-') { "studio" } else { "standard" }
-
-    Write-Host "--- Signing $variant : $(Split-Path $p -Leaf) ---" -ForegroundColor Yellow
-    & $minisign.Source -Sm $p -s $KeyPath `
-        -c "Offspring $variant release build" `
-        -t $buildId
-    if ($LASTEXITCODE -ne 0) {
-        throw "minisign signing failed (exit $LASTEXITCODE) on $p"
+    $leaf = Split-Path $p -Leaf
+    $buildId = "offspring-{0}-{1}" -f $leaf, (Get-Date -Format "yyyyMMdd-HHmmss")
+    $variant = if ($leaf -match 'Offspring-Studio-') {
+        "studio"
+    } elseif ($leaf -match '\.dmg$') {
+        "macos"
+    } else {
+        "standard"
     }
+    $untrusted = "Offspring $variant release build"
+
+    Write-Host "--- Signing $variant : $leaf ---" -ForegroundColor Yellow
+    if ($Tool -eq 'minisign') {
+        # `-Sm` signs the file in-place (writes <file>.minisig next to it).
+        & $toolBin.Source -Sm $p -s $KeyPath -c $untrusted -t $buildId
+        if ($LASTEXITCODE -ne 0) {
+            throw "minisign signing failed (exit $LASTEXITCODE) on $p"
+        }
+    } else {
+        # offspring-sign reads MINISIGN_PASSWORD straight from the
+        # environment, so we just invoke it with the right args and
+        # check the exit code. No stdin pipes, no encoding gotchas.
+        $sigPath = "$p.minisig"
+        Write-Host "  (password length: $($env:MINISIGN_PASSWORD.Length))" -ForegroundColor DarkGray
+        & $toolBin.Source $KeyPath $p $sigPath $buildId $untrusted
+        if ($LASTEXITCODE -ne 0) {
+            throw "offspring-sign failed (exit $LASTEXITCODE) on $p"
+        }
+    }
+
     $sig = "$p.minisig"
     if (-not (Test-Path $sig)) {
-        throw "minisign reported success but $sig wasn't produced"
+        throw "$Tool reported success but $sig wasn't produced"
     }
     $signed += $sig
     Write-Host ""
