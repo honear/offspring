@@ -41,6 +41,8 @@ pub mod modern_menu;
 pub mod sendto;
 #[cfg(target_os = "macos")]
 pub mod services_mac;
+#[cfg(target_os = "macos")]
+pub mod dock_mac;
 
 use anyhow::Result;
 

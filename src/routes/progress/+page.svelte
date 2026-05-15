@@ -137,19 +137,39 @@
     // Outer try/catch so an unexpected throw in the mount chain surfaces
     // to the UI instead of leaving the window frozen at "Preparing…".
     try {
-      // Reveal the window once WebView2 has actually committed the
-      // first paint — `onMount` fires the moment the DOM is built,
-      // but the pixels are still a frame or two behind. Showing
-      // before the paint commits is what produced the blank-frame
-      // flash earlier. `afterFirstPaint()` waits two RAFs which is
-      // the standard "next frame is on screen" idiom.
+      // Reveal the window once the webview has actually committed the
+      // first paint — `onMount` fires the moment the DOM is built, but
+      // the pixels are still a frame or two behind. Showing before the
+      // paint commits produced a blank-frame flash. `afterFirstPaint()`
+      // waits two RAFs which is the standard "next frame is on screen"
+      // idiom.
+      //
+      // The setFocus() call is what activates the app on macOS. Without
+      // it, when the picker closes itself right after kicking off the
+      // encode, Offspring loses activation and the (already always-on-
+      // top) progress window opens beneath whatever's now in front —
+      // typically Finder. The trim/modify/compare windows hit the same
+      // issue and use the same dance to recover.
+      //
+      // Unlike those dialogs, we keep alwaysOnTop set to `true` at the
+      // end: the progress window is built with `.always_on_top(true)`
+      // and is meant to stay above the user's other windows for the
+      // entire encode, not just the first frame.
       //
       // Ignored failures: when the route is reached via in-place
       // navigation (Custom / Trim → /progress/) the window is already
-      // visible and `show()` is a no-op.
-      void api.afterFirstPaint().then(() =>
-        getCurrentWindow().show().catch(() => {}),
-      );
+      // visible and these calls are mostly no-ops.
+      void (async () => {
+        try {
+          const w = getCurrentWindow();
+          await api.afterFirstPaint();
+          await w.show();
+          await w.setAlwaysOnTop(true);
+          await w.setFocus();
+        } catch (err) {
+          console.warn("[progress] show/focus failed:", err);
+        }
+      })();
 
       // OS-level close paths (Alt+F4, title-bar X, taskbar "Close
       // window") fire `tauri://close-requested` before the window

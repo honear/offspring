@@ -83,6 +83,15 @@ export const openExternalUrl = (url: string) =>
  *  next encode entry-point resets the flag on the way in. */
 export const cancelEncode = () => invoke<void>("cancel_encode");
 
+/** macOS-only: probe whether the user has ticked Offspring's entry in
+ *  System Settings → Keyboard → Services. Returns `false` on every
+ *  other platform. Used by the first-launch hint to keep the dialog
+ *  open until the user has actually enabled the service, and by the
+ *  Settings card to surface enable status. */
+export const isMacosServiceEnabled = () =>
+  invoke<boolean>("is_macos_service_enabled");
+
+
 /** Open a native file picker filtered to alpha-capable image formats
  *  and return the chosen path. `null` means the user cancelled.
  *  Used by the Overlay tool's "Add watermark" toggle. */

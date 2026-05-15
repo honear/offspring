@@ -399,6 +399,15 @@ pub struct Settings {
     ///     while wiping metadata).
     #[serde(default)]
     pub color_management: Option<bool>,
+    /// macOS only. Tracks whether the user has seen the one-time
+    /// onboarding hint that explains how to enable the Offspring
+    /// entry under System Settings → Keyboard → Services. macOS
+    /// hides newly-discovered service providers by default, so
+    /// without this nudge the right-click flow looks broken on
+    /// first launch. `None` / `Some(false)` triggers the hint;
+    /// dismissing it (either button) flips this to `Some(true)`.
+    #[serde(default)]
+    pub seen_macos_services_hint: Option<bool>,
     /// Extension tools (auto-detect sequences, merge multi-select, …).
     /// See `ToolsSettings` for the per-tool knobs. Absent / partial JSON
     /// falls back to `ToolsSettings::default()` so old settings files

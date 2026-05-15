@@ -21,6 +21,23 @@
 -->
 <plist version="1.0">
 <dict>
+    <!--
+        LSUIElement = true makes Offspring an "agent" / "accessory"
+        application: no icon in the Dock, no menu bar (the global one
+        at the top of the screen), no application switcher entry —
+        the app lives in the system menu bar instead. Set as the
+        default state because the most common entry points are
+        Finder right-click (Services) and the menu bar tray icon;
+        neither benefits from a Dock presence.
+
+        We bump the activation policy to "regular" dynamically when
+        the user opens the main settings window (see
+        integration/dock_mac.rs), so the Dock icon appears for the
+        duration of that window and disappears again on close.
+    -->
+    <key>LSUIElement</key>
+    <true/>
+
     <key>NSServices</key>
     <array>
         <dict>
@@ -28,6 +45,21 @@
             <dict>
                 <key>default</key>
                 <string>Offspring…</string>
+                <!--
+                    Undocumented but historically-supported key on
+                    NSMenuItem dicts in NSServices: refers to a PNG
+                    in Contents/Resources/ by base name. macOS uses
+                    it to render an icon next to the menu entry.
+                    Honored inconsistently across macOS versions —
+                    Apple's own Services menu styling is text-only,
+                    and depending on the macOS build the renderer
+                    may ignore this key entirely. We ship the file
+                    via tauri.conf.json's bundle.resources so it
+                    lands at the right path; if your macOS doesn't
+                    paint it, no harm done — the menu still works.
+                -->
+                <key>image</key>
+                <string>ServiceMenuIcon</string>
             </dict>
             <key>NSMessage</key>
             <string>openOffspringPicker</string>

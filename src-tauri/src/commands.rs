@@ -326,7 +326,14 @@ pub fn open_log_folder() -> Result<(), String> {
 #[tauri::command]
 pub fn open_external_url(url: String) -> Result<(), String> {
     let lower = url.to_ascii_lowercase();
-    if !(lower.starts_with("http://") || lower.starts_with("https://")) {
+    let is_http = lower.starts_with("http://") || lower.starts_with("https://");
+    // macOS-only: System Settings deep links use the
+    // `x-apple.systempreferences:` scheme. We allow them so the
+    // first-launch Services hint can jump the user straight to the
+    // right pane. Still narrow — anything else non-http is rejected.
+    let is_mac_settings = cfg!(target_os = "macos")
+        && lower.starts_with("x-apple.systempreferences:");
+    if !(is_http || is_mac_settings) {
         return Err(format!("refusing non-http(s) URL: {url}"));
     }
     #[cfg(windows)]
@@ -359,6 +366,66 @@ pub fn open_external_url(url: String) -> Result<(), String> {
 #[tauri::command]
 pub fn cancel_encode() {
     ffmpeg::request_cancel();
+}
+
+/// macOS: probe whether the user has ticked the "Offspring…" entry in
+/// System Settings → Keyboard → Services. Returns `true` when enabled,
+/// `false` when disabled OR when the entry has never been touched (its
+/// default state is "off" — a fresh install with no toggle ever made
+/// looks the same as an explicit untick).
+///
+/// Source of truth: `~/Library/Preferences/pbs.plist` under
+/// `NSServicesStatus`. We shell out to `defaults read` rather than
+/// parse the plist directly to avoid pulling in a plist crate for
+/// what is a single-call, single-string check. Output looks like:
+///
+///   {
+///       "xyz.secondmarch.offspring - Offspring\U2026 - openOffspringPicker" = {
+///           "enabled_context_menu" = 1;
+///           "enabled_services_menu" = 1;
+///           ...
+///       };
+///   }
+///
+/// We locate our bundle-id substring, scope to the `};`-terminated
+/// dict that follows it, and check for either of the two enable
+/// flags. The presence-of-bundle-id check guards against false hits
+/// from other apps that happen to be in the same plist.
+///
+/// Called by the macOS first-launch hint to keep the dialog open
+/// until the user has actually enabled the service, and by the
+/// Settings → Finder integration card to show "Enabled ✓" / "Not
+/// enabled" status.
+#[tauri::command]
+#[allow(unused_variables)]
+pub fn is_macos_service_enabled() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        let output = std::process::Command::new("defaults")
+            .args(["read", "pbs", "NSServicesStatus"])
+            .output();
+        let stdout = match output {
+            Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).into_owned(),
+            _ => return false,
+        };
+        let bundle_id = "xyz.secondmarch.offspring";
+        let Some(idx) = stdout.find(bundle_id) else {
+            return false;
+        };
+        // Clamp to our entry's value-dict so a downstream app's
+        // "enabled_*" flag can't be mistaken for ours.
+        let tail = &stdout[idx..];
+        let scope_end = tail.find("};").map(|e| e + 2).unwrap_or(tail.len());
+        let scope = &tail[..scope_end];
+        scope.contains("\"enabled_context_menu\" = 1")
+            || scope.contains("\"enabled_services_menu\" = 1")
+            || scope.contains("enabled_context_menu = 1")
+            || scope.contains("enabled_services_menu = 1")
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        false
+    }
 }
 
 /// Open a native file picker filtered to image formats and return the
@@ -1408,6 +1475,31 @@ pub fn encode_trim(
 /// Compute a logical (x, y) that centers a `w × h` window on the cursor,
 /// clamped to the monitor the cursor is on. Returns `None` if cursor or
 /// monitor lookups fail — caller should then let Tauri choose (typically
+/// Bring the app to the foreground without changing its activation
+/// policy. Only meaningful on macOS. Currently UNUSED — we used to
+/// call this from every transient `open_*_window` to defeat
+/// focus-stealing protection, but the `activateIgnoringOtherApps:`
+/// call inside it briefly promoted Offspring out of Accessory mode
+/// and showed a Dock icon flash that the user found objectionable.
+///
+/// We've found `visible(true) + set_focus()` enough in practice for
+/// Service-triggered windows: the Service callback already activates
+/// the app, the picker is built visible (so it claims focus from
+/// Finder), and downstream windows opened from the picker inherit
+/// that activation. Kept as an emergency hook in case a regression
+/// surfaces where transient windows open behind other apps.
+///
+/// Dispatches via `run_on_main_thread` because every NSApp call must
+/// happen on the main thread; Tauri command handlers run on a worker
+/// pool. No-op on Windows / Linux — `_app` is unused.
+#[cfg(target_os = "macos")]
+#[allow(dead_code)]
+fn activate_app_macos(app: &tauri::AppHandle) {
+    let _ = app.run_on_main_thread(|| {
+        integration::dock_mac::activate_without_dock();
+    });
+}
+
 /// upper-left of primary monitor). Handles per-monitor DPI correctly by
 /// scaling cursor physical → monitor-local logical coords.
 fn position_near_cursor(app: &tauri::AppHandle, w: f64, h: f64) -> Option<(f64, f64)> {
@@ -1438,27 +1530,37 @@ pub fn open_progress_window(app: &tauri::AppHandle) -> anyhow::Result<()> {
     let (pw, ph) = (380.0, 140.0);
     // Trailing slash is important: svelte.config uses
     // `trailingSlash: 'always'` so each route is prerendered to
-    // `build/<route>/index.html`, and the URL that SvelteKit's client router
-    // normalises against its registered routes is `/progress/` — NOT
-    // `/progress.html`, which 404s on the router even though the file is
-    // present on disk.
+    // `build/<route>/index.html`, and the URL that SvelteKit's client
+    // router normalises against its registered routes is `/progress/`
+    // — NOT `/progress.html`, which 404s on the router even though
+    // the file is present on disk.
     //
-    // `.visible(false)` builds the OS window hidden so WebView2 has time
-    // to fetch + execute the Svelte bundle before anything appears on
-    // screen. The progress route calls `getCurrentWindow().show()` from
-    // its `onMount` once Svelte has rendered its first frame, killing
-    // the brief blank-window flash that used to precede the encoder UI.
+    // `.visible(true)` is deliberate on macOS: when this window is
+    // opened in response to a Services-flow pick (picker → preset →
+    // here), the picker JS calls `getCurrentWindow().close()` the
+    // instant `pick_run_preset` resolves, before the progress route's
+    // onMount can run a show()/setFocus() dance. macOS revokes our
+    // activation as soon as the picker disappears, and a deferred
+    // setFocus from a deactivated app is silently rate-limited — the
+    // window exists but never comes to the front. Building visible
+    // makes the OS window grant activation at creation time, so it
+    // stays in front when the picker closes a tick later.
+    //
+    // Cost: a brief blank window before the webview paints. Tradeoff
+    // is acceptable; an invisible "encoding now" window is the worst
+    // possible UX.
     let mut b = WebviewWindowBuilder::new(app, "progress", WebviewUrl::App("progress/".into()))
         .title("Offspring — Encoding")
         .inner_size(pw, ph)
         .resizable(false)
         .always_on_top(true)
         .decorations(true)
-        .visible(false);
+        .visible(true);
     if let Some((x, y)) = position_near_cursor(app, pw, ph) {
         b = b.position(x, y);
     }
-    b.build()?;
+    let w = b.build()?;
+    let _ = w.set_focus();
     Ok(())
 }
 
@@ -1506,58 +1608,135 @@ pub fn open_custom_window(app: &tauri::AppHandle, files: Vec<String>) -> anyhow:
 /// reveals it after first paint.
 pub fn open_modify_window(app: &tauri::AppHandle, files: Vec<String>) -> anyhow::Result<()> {
     let (pw, ph) = (920.0, 760.0);
+    // visible(true): see comment on open_progress_window — when this
+    // is opened from the macOS Services picker, the picker closes
+    // itself the moment we return, and a deferred show() from the
+    // frontend can no longer activate the app once the picker is
+    // gone. Building visible avoids the race entirely.
     let mut b = WebviewWindowBuilder::new(app, "modify", WebviewUrl::App("modify/".into()))
         .title("Offspring — Modify")
         .inner_size(pw, ph)
         .min_inner_size(640.0, 520.0)
         .resizable(true)
         .focused(true)
-        .visible(false);
+        .visible(true);
     if let Some((x, y)) = position_near_cursor(app, pw, ph) {
         b = b.position(x, y);
     }
     let w = b.build()?;
     app.manage_pending_files(files);
     let _ = w.unminimize();
-    let _ = w.set_always_on_top(true);
     let _ = w.set_focus();
-    let _ = w.set_always_on_top(false);
     Ok(())
 }
 
-/// Picker → run a preset on its pending files. Called when the user
-/// clicks a preset row in the macOS Services picker window. Routes
-/// through the existing `encode` command so the encode logic stays
-/// single-sourced.
+/// Reset every dispatch-routing flag on `PendingState` to its
+/// neutral value. The progress route inspects these flags on mount
+/// to decide which encoder to call (`isMerge`, `isInvert`, etc.) in
+/// a cascading if/else; if any flag is left over from a previous run
+/// it would silently route the next run through the wrong encoder.
+/// Call this at the start of every preset/tool dispatch so the only
+/// state the route sees is the one we intend.
+fn clear_pending_routing(app: &tauri::AppHandle) {
+    app.manage_pending_preset(None);
+    app.manage_pending_custom_preset(None);
+    app.manage_pending_merge(false);
+    app.manage_pending_grayscale(false);
+    app.manage_pending_compare(false);
+    app.manage_pending_overlay(false);
+    app.manage_pending_invert(false);
+    app.manage_pending_make_square(false);
+}
+
+/// Picker / tray → run a preset on the supplied files. Sets up
+/// pending state and opens the progress window; the route's
+/// `onMount` reads `pending_preset_id`, looks up the preset, and
+/// calls `encode(files, preset)`. We do NOT call `encode` here —
+/// doing so used to cause double-dispatch (once from this fn, once
+/// from the route) where the encoder ran twice in parallel: one
+/// would succeed, the other would clobber its output mid-write.
+/// The single-source-of-dispatch is the route.
 #[tauri::command]
 pub fn pick_run_preset(
     app: tauri::AppHandle,
     files: Vec<String>,
     preset_id: String,
 ) -> Result<(), String> {
+    // Validate the preset exists so we can fail fast in the picker
+    // instead of silently opening an empty progress window if the
+    // preset list has drifted (e.g. user just deleted the preset).
     let presets = presets::load_presets().map_err(|e| e.to_string())?;
-    let preset = presets
+    let _preset = presets
         .into_iter()
         .find(|p| p.id == preset_id)
         .ok_or_else(|| format!("preset '{preset_id}' not found"))?;
-    open_progress_window(&app).map_err(|e| e.to_string())?;
-    app.manage_pending_files(files.clone());
-    encode(app, files, preset)
+
+    clear_pending_routing(&app);
+    app.manage_pending_files(files);
+    app.manage_pending_preset(Some(preset_id));
+    open_progress_window(&app).map_err(|e| e.to_string())
 }
 
-/// Picker → open a tool's dialog window with the pending files. The
-/// tool's own UI then drives the rest of the flow (collect parameters,
-/// navigate to /progress/, call encode_*).
+/// Picker / tray → run a tool on the supplied files. Each tool is
+/// either:
+///   * **dialog-driven**  — opens a parameter-collecting window
+///     (Modify, Trim) which itself drives the in-place navigation
+///     to /progress/ and calls the encoder; or
+///   * **direct-encode**  — sets the matching pending-tool flag and
+///     opens the progress window. The route reads the flag on mount
+///     and dispatches to `api.encode_<tool>(files)`. Same pattern
+///     the Windows CLI dispatch uses; do NOT call the encoder here
+///     or it'll race with the route's call.
+///   * **context-dependent** — Compare picks dialog vs direct based
+///     on file count: 2 files = side-by-side encode; 3+ = grid
+///     dialog so the user can choose column count + layout.
+///
+/// Mirrors the surface area of the Windows context_menu.rs entries
+/// so the macOS Services picker + menu bar tray expose every tool
+/// the Windows shell-extension already does.
 #[tauri::command]
 pub fn pick_run_tool(
     app: tauri::AppHandle,
     files: Vec<String>,
     tool: String,
 ) -> Result<(), String> {
+    // Direct-encode helper: clear stale routing, set the named tool
+    // flag, open the progress window. The route reads pending state
+    // on mount and dispatches to the matching `api.encode_<tool>`.
+    let direct = |app: &tauri::AppHandle,
+                  files: Vec<String>,
+                  set_flag: fn(&tauri::AppHandle)|
+     -> Result<(), String> {
+        clear_pending_routing(app);
+        app.manage_pending_files(files);
+        set_flag(app);
+        open_progress_window(app).map_err(|e| e.to_string())
+    };
+
     match tool.as_str() {
+        // Dialog-driven — windows handle their own state setup +
+        // navigation to /progress/, so we don't touch routing flags.
         "modify" => open_modify_window(&app, files).map_err(|e| e.to_string()),
         "trim" => open_trim_window(&app, files).map_err(|e| e.to_string()),
-        "compare" => open_compare_grid_window(&app, files).map_err(|e| e.to_string()),
+
+        // Compare: 2 = direct side-by-side; 3+ = grid dialog so the
+        // user can choose cols + Grid/Mosaic layout. Mirrors the CLI
+        // dispatch in lib.rs::open_window_for_pending.
+        "compare" => {
+            if files.len() == 2 {
+                direct(&app, files, |a| a.manage_pending_compare(true))
+            } else {
+                open_compare_grid_window(&app, files).map_err(|e| e.to_string())
+            }
+        }
+
+        // Direct-encode tools
+        "grayscale" => direct(&app, files, |a| a.manage_pending_grayscale(true)),
+        "overlay" => direct(&app, files, |a| a.manage_pending_overlay(true)),
+        "merge" => direct(&app, files, |a| a.manage_pending_merge(true)),
+        "invert" => direct(&app, files, |a| a.manage_pending_invert(true)),
+        "make_square" => direct(&app, files, |a| a.manage_pending_make_square(true)),
+
         other => Err(format!("unknown tool: {other}")),
     }
 }
@@ -1573,11 +1752,17 @@ pub fn pick_run_tool(
 /// doesn't flash with a blank frame; the frontend reveals it after
 /// first paint.
 pub fn open_pick_window(app: &tauri::AppHandle, files: Vec<String>) -> anyhow::Result<()> {
-    let (pw, ph) = (520.0, 600.0);
+    // Two-column layout (Presets | Tools) wants more horizontal room
+    // than the original single-column 520. 760 fits comfortably with
+    // 8 tools on the right and a healthy preset list on the left
+    // without either column getting cramped. Height bumped to 620 so
+    // the default preset count fits without triggering a per-column
+    // scrollbar; columns still scroll independently when overflowed.
+    let (pw, ph) = (760.0, 620.0);
     let mut b = WebviewWindowBuilder::new(app, "pick", WebviewUrl::App("pick/".into()))
         .title("Offspring")
         .inner_size(pw, ph)
-        .min_inner_size(420.0, 380.0)
+        .min_inner_size(620.0, 360.0)
         .resizable(true)
         .focused(true)
         .visible(false);
@@ -1595,19 +1780,22 @@ pub fn open_pick_window(app: &tauri::AppHandle, files: Vec<String>) -> anyhow::R
 
 pub fn open_trim_window(app: &tauri::AppHandle, files: Vec<String>) -> anyhow::Result<()> {
     let (pw, ph) = (440.0, 420.0);
+    // visible(true): see comment on open_progress_window for why we
+    // can't rely on a frontend-deferred show() in the Services-picker
+    // flow.
     let mut b = WebviewWindowBuilder::new(app, "trim", WebviewUrl::App("trim/".into()))
         .title("Offspring — Trim")
         .inner_size(pw, ph)
         .min_inner_size(380.0, 320.0)
         .resizable(true)
         .focused(true)
-        .visible(false);
+        .visible(true);
     if let Some((x, y)) = position_near_cursor(app, pw, ph) {
         b = b.position(x, y);
     }
     let w = b.build()?;
     app.manage_pending_files(files);
-    let _ = w; // frontend handles show() + focus dance after first paint
+    let _ = w.set_focus();
     Ok(())
 }
 
@@ -1620,6 +1808,9 @@ pub fn open_trim_window(app: &tauri::AppHandle, files: Vec<String>) -> anyhow::R
 /// with the params baked into the URL.
 pub fn open_compare_grid_window(app: &tauri::AppHandle, files: Vec<String>) -> anyhow::Result<()> {
     let (pw, ph) = (440.0, 400.0);
+    // visible(true): see comment on open_progress_window for why we
+    // can't rely on a frontend-deferred show() in the Services-picker
+    // flow.
     let mut b = WebviewWindowBuilder::new(
         app,
         "compare-grid",
@@ -1630,17 +1821,36 @@ pub fn open_compare_grid_window(app: &tauri::AppHandle, files: Vec<String>) -> a
         .min_inner_size(380.0, 280.0)
         .resizable(true)
         .focused(true)
-        .visible(false);
+        .visible(true);
     if let Some((x, y)) = position_near_cursor(app, pw, ph) {
         b = b.position(x, y);
     }
     let w = b.build()?;
     app.manage_pending_files(files);
-    let _ = w; // frontend handles show() + focus dance after first paint
+    let _ = w.set_focus();
     Ok(())
 }
 
 pub fn open_main_window(app: &tauri::AppHandle) -> anyhow::Result<()> {
+    // If the main window already exists (user re-clicked the menu bar
+    // "Open settings" while it's still around), bring it to the
+    // foreground instead of erroring on label conflict. On macOS this
+    // also re-asserts the Regular activation policy in case it was
+    // somehow demoted while the window was hidden behind another app.
+    if let Some(existing) = app.get_webview_window("main") {
+        let _ = existing.unminimize();
+        let _ = existing.set_focus();
+        #[cfg(target_os = "macos")]
+        {
+            let app_cl = app.clone();
+            let _ = app.run_on_main_thread(move || {
+                integration::dock_mac::set_regular();
+                let _ = app_cl;
+            });
+        }
+        return Ok(());
+    }
+
     let (pw, ph) = (880.0, 820.0);
     let mut b = WebviewWindowBuilder::new(app, "main", WebviewUrl::App("".into()))
         .title("Offspring")
@@ -1656,7 +1866,30 @@ pub fn open_main_window(app: &tauri::AppHandle) -> anyhow::Result<()> {
     if let Some((x, y)) = position_near_cursor(app, pw, ph) {
         b = b.position(x, y);
     }
-    b.build()?;
+    let w = b.build()?;
+
+    // Switch to a Regular activation policy for the lifetime of this
+    // window: Dock icon + cmd-tab + global menu bar return to normal
+    // app behavior. On window destroy we drop back to Accessory so the
+    // app keeps running for the menu bar tray + Services without
+    // polluting the Dock. macOS only — Windows/Linux are no-ops.
+    #[cfg(target_os = "macos")]
+    {
+        let app_open = app.clone();
+        let _ = app.run_on_main_thread(move || {
+            integration::dock_mac::set_regular();
+            let _ = app_open;
+        });
+        let app_close = app.clone();
+        w.on_window_event(move |event| {
+            if matches!(event, tauri::WindowEvent::Destroyed) {
+                let _ = app_close.run_on_main_thread(|| {
+                    integration::dock_mac::set_accessory();
+                });
+            }
+        });
+    }
+
     Ok(())
 }
 

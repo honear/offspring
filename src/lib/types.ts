@@ -66,6 +66,12 @@ export interface Settings {
    *  flyout-open time; toggling takes effect immediately without an
    *  Explorer restart. */
   modern_menu_split_layout?: boolean | null;
+  /** macOS only. Tracks whether the user has dismissed the one-time
+   *  hint that explains how to enable the Offspring entry under
+   *  System Settings → Keyboard → Services. macOS hides newly-
+   *  discovered service providers by default, so without this nudge
+   *  the right-click flow looks broken on first launch. */
+  seen_macos_services_hint?: boolean | null;
   /** Extension tools: auto-sequence detection, merge, etc. Always present
    *  — Rust fills in defaults for missing fields when loading old settings. */
   tools?: ToolsSettings;

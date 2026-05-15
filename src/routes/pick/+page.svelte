@@ -24,12 +24,23 @@
   let busy = $state(false);
   let err = $state<string | null>(null);
 
-  // Tools the picker offers. Each maps to a `pick_run_tool` invocation;
-  // Rust opens the corresponding dialog window with the pending files.
-  const TOOLS: { id: "modify" | "trim" | "compare"; label: string; hint: string }[] = [
-    { id: "modify",  label: "Modify…",       hint: "Crop, rotate, flip, reverse, remove audio" },
-    { id: "trim",    label: "Trim…",         hint: "Set start / end seconds" },
-    { id: "compare", label: "Compare grid…", hint: "Build a side-by-side grid of the selected files" },
+  // Tools the picker offers. Mirrors the full Windows context-menu
+  // surface (context_menu.rs) so feature parity is one-for-one. Each
+  // entry maps to a `pick_run_tool` invocation; Rust either opens a
+  // dialog (Modify, Trim) or runs the encoder directly + opens the
+  // progress window (the remaining five).
+  type ToolId =
+    | "grayscale" | "overlay" | "merge" | "compare"
+    | "trim" | "invert" | "make_square" | "modify";
+  const TOOLS: { id: ToolId; label: string; hint: string }[] = [
+    { id: "grayscale",   label: "Greyscale",    hint: "Convert to black and white" },
+    { id: "overlay",     label: "Overlay",      hint: "Burn filename / timecode / custom text into the file" },
+    { id: "merge",       label: "Merge",        hint: "Concatenate selected files into one (2+ videos)" },
+    { id: "compare",     label: "Compare…",     hint: "Side-by-side (2 files) or grid (3+ files)" },
+    { id: "trim",        label: "Trim…",        hint: "Set start / end seconds" },
+    { id: "invert",      label: "Invert",       hint: "Flip RGB to create a negative (images only)" },
+    { id: "make_square", label: "Make Square",  hint: "Pad shorter edge to a square output (images only)" },
+    { id: "modify",      label: "Modify…",      hint: "Crop, rotate, flip, reverse, remove audio" },
   ];
 
   onMount(async () => {
@@ -64,7 +75,7 @@
     }
   }
 
-  async function runTool(tool: "modify" | "trim" | "compare") {
+  async function runTool(tool: ToolId) {
     if (busy) return;
     busy = true;
     try {
@@ -96,43 +107,47 @@
   {:else if err}
     <p class="err">{err}</p>
   {:else}
-    {#if presets.length > 0}
-      <section>
+    <div class="columns">
+      <section class="col col-presets">
         <h2>Presets</h2>
+        {#if presets.length === 0}
+          <p class="muted tiny">No presets enabled. Add one in Settings.</p>
+        {:else}
+          <ul>
+            {#each presets as p (p.id)}
+              <li>
+                <button
+                  class="row"
+                  disabled={busy}
+                  onclick={() => runPreset(p)}
+                >
+                  <span class="fmt-tag {p.format}">{p.format.toUpperCase()}</span>
+                  <span class="name">{p.name}</span>
+                </button>
+              </li>
+            {/each}
+          </ul>
+        {/if}
+      </section>
+
+      <section class="col col-tools">
+        <h2>Tools</h2>
         <ul>
-          {#each presets as p (p.id)}
+          {#each TOOLS as t (t.id)}
             <li>
               <button
-                class="row"
+                class="row tool"
                 disabled={busy}
-                onclick={() => runPreset(p)}
+                onclick={() => runTool(t.id)}
               >
-                <span class="fmt-tag {p.format}">{p.format.toUpperCase()}</span>
-                <span class="name">{p.name}</span>
+                <span class="name">{t.label}</span>
+                <span class="hint">{t.hint}</span>
               </button>
             </li>
           {/each}
         </ul>
       </section>
-    {/if}
-
-    <section>
-      <h2>Tools</h2>
-      <ul>
-        {#each TOOLS as t (t.id)}
-          <li>
-            <button
-              class="row tool"
-              disabled={busy}
-              onclick={() => runTool(t.id)}
-            >
-              <span class="name">{t.label}</span>
-              <span class="hint">{t.hint}</span>
-            </button>
-          </li>
-        {/each}
-      </ul>
-    </section>
+    </div>
   {/if}
 </main>
 
@@ -154,12 +169,31 @@
     -webkit-font-smoothing: antialiased;
   }
   .pick {
-    padding: 16px 18px 20px;
+    padding: 16px 18px 18px;
     display: flex;
     flex-direction: column;
     height: 100vh;
     box-sizing: border-box;
-    gap: 14px;
+    gap: 12px;
+  }
+  .columns {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 18px;
+    flex: 1;
+    min-height: 0; /* let children scroll */
+  }
+  .col {
+    min-height: 0;
+    overflow-y: auto;
+  }
+  .col-presets {
+    border-right: 1px solid #2c2c2e;
+    padding-right: 14px;
+  }
+  .tiny {
+    font-size: 11px;
+    margin: 4px 0 0;
   }
   header h1 {
     font-size: 16px;

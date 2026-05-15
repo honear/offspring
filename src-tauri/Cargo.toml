@@ -105,7 +105,10 @@ objc2 = "0.5"
 # NSObject (base class), NSThread (MainThreadMarker plumbing).
 objc2-foundation = { version = "0.2", features = ["NSString", "NSArray", "NSDictionary", "NSObject", "NSThread"] }
 # objc2-app-kit gates NSApp / NSPasteboard behind their own features.
-objc2-app-kit = { version = "0.2", features = ["NSApplication", "NSResponder", "NSPasteboard"] }
+# NSRunningApplication brings in NSApplicationActivationPolicy, which
+# integration/dock_mac.rs uses to toggle the Dock icon on/off when the
+# main settings window opens/closes.
+objc2-app-kit = { version = "0.2", features = ["NSApplication", "NSResponder", "NSPasteboard", "NSRunningApplication"] }
 
 [profile.release]
 codegen-units = 1

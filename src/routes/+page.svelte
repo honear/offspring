@@ -45,6 +45,14 @@
     message: string;
     confirmLabel: string;
     onConfirm: () => void | Promise<void>;
+    // Optional overrides so the same modal can serve both
+    // destructive confirms (default "Cancel" + danger primary) and
+    // neutral info-with-action hints (custom cancel label + plain
+    // primary button). Backwards-compatible — existing call sites
+    // omit these and get the original behaviour.
+    cancelLabel?: string;
+    confirmClass?: string;
+    onCancel?: () => void | Promise<void>;
   } | null>(null);
 
   // Drag-and-drop reorder state. `dragId` is the preset being dragged;
@@ -465,6 +473,12 @@
     // Settings tab directly so the big "Download FFmpeg" button is the
     // first thing they see instead of a silently-broken app.
     if (!ffmpeg.found) tab = "settings";
+    // macOS one-time Services-onboarding hint. We don't queue behind
+    // the FFmpeg-missing prompt — that one just routes to a tab, no
+    // modal is shown — so showing the hint immediately is fine.
+    if (platform === "macos" && !settings.seen_macos_services_hint) {
+      showMacosServicesHint();
+    }
   }
 
   function genId(name: string): string {
@@ -611,6 +625,110 @@
     ffmpeg = await api.ffmpegStatus();
   }
 
+  // macOS-only Services-onboarding hint. Surfaces the System Settings
+  // → Keyboard → Services pane via a deep-link URL because macOS hides
+  // newly-discovered service providers by default, so without this
+  // nudge the right-click "Offspring…" entry never appears even though
+  // our NSServices declaration is correct.
+  //
+  // State machine:
+  //   closed  — not visible
+  //   idle    — initial: explanation + "Open Services Settings" / "I'll do it later"
+  //   waiting — after Open Settings was clicked: keep dialog open, poll
+  //             for the user to actually tick the box; auto-dismiss the
+  //             moment the check returns true so the user gets visible
+  //             confirmation that what they did worked. Without this we
+  //             closed the dialog and the user had no anchor for the
+  //             multi-step path inside System Settings.
+  //
+  // Effect lower in the file polls `is_macos_service_enabled` every 2s
+  // and on every window-focus event while in the waiting phase. The
+  // poll is cheap (single `defaults read` call) and stops as soon as
+  // the dialog leaves the waiting phase.
+  type MacosHintState =
+    | { phase: "closed" }
+    | { phase: "idle" }
+    | { phase: "waiting" };
+  let macosHint = $state<MacosHintState>({ phase: "closed" });
+
+  function showMacosServicesHint() {
+    macosHint = { phase: "idle" };
+  }
+
+  async function macosHintOpenSettings() {
+    try {
+      await api.openExternalUrl(
+        "x-apple.systempreferences:com.apple.preference.keyboard?Services",
+      );
+    } catch (err) {
+      console.warn("open services pane failed:", err);
+    }
+    // Don't dismiss — stay open so the user has the instructions while
+    // they're inside System Settings. Auto-detect kicks in via the
+    // effect below.
+    macosHint = { phase: "waiting" };
+    await checkMacosServiceEnabled();
+  }
+
+  // One-shot probe. The waiting-phase effect calls this on focus and
+  // on a 2s timer; the user can also trigger it with the "Check now"
+  // button. When the service flips to enabled we close the dialog and
+  // persist the seen flag — that's the user's "it worked" signal.
+  async function checkMacosServiceEnabled() {
+    try {
+      const enabled = await api.isMacosServiceEnabled();
+      if (enabled) {
+        macosHint = { phase: "closed" };
+        await dismissMacosServicesHint();
+      }
+    } catch (err) {
+      console.warn("is_macos_service_enabled failed:", err);
+    }
+  }
+
+  // User explicitly bailed out of the dialog without enabling. Persist
+  // the seen flag so we don't nag again on next launch — but they can
+  // still re-open it from Settings → Finder integration.
+  function macosHintDismiss() {
+    macosHint = { phase: "closed" };
+    void dismissMacosServicesHint();
+  }
+
+  // Persist the "user has seen the hint" flag so the dialog doesn't
+  // re-fire on next launch. Re-openable from Settings → Finder
+  // integration via the same showMacosServicesHint() entry point.
+  async function dismissMacosServicesHint() {
+    if (settings.seen_macos_services_hint) return;
+    settings.seen_macos_services_hint = true;
+    try { await api.saveSettings(settings); } catch (err) {
+      console.warn("save settings (macos hint flag) failed:", err);
+    }
+  }
+
+  // While the hint is in its "waiting" phase (user clicked Open
+  // Settings, we're waiting for them to tick the box), poll for the
+  // service-enabled state. Two triggers:
+  //   1. Every window-focus event (cheap, fires when the user comes
+  //      back from System Settings).
+  //   2. A 2s timer as a fallback in case focus events miss (e.g.
+  //      System Settings was already in front).
+  // Both stop the moment phase leaves "waiting", whether because we
+  // detected the enable or the user dismissed.
+  $effect(() => {
+    if (macosHint.phase !== "waiting") return;
+    let cancelled = false;
+    const tick = () => { if (!cancelled) void checkMacosServiceEnabled(); };
+    const id = setInterval(tick, 2000);
+    const unlistenP = getCurrentWindow().onFocusChanged(({ payload }) => {
+      if (payload) tick();
+    });
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+      void unlistenP.then((fn) => fn()).catch(() => {});
+    };
+  });
+
   function resetDefaults() {
     confirmDialog = {
       title: "Reset to defaults?",
@@ -687,7 +805,11 @@
   <div
     class="modal-backdrop"
     role="presentation"
-    onclick={() => (confirmDialog = null)}
+    onclick={async () => {
+      const fn = confirmDialog!.onCancel;
+      confirmDialog = null;
+      if (fn) await fn();
+    }}
   >
     <div
       class="modal"
@@ -699,11 +821,18 @@
       <h3 id="confirm-title" class="modal-title">{confirmDialog.title}</h3>
       <p id="confirm-message" class="modal-message">{confirmDialog.message}</p>
       <div class="modal-actions">
-        <button class="ghost" onclick={() => (confirmDialog = null)}>
-          Cancel
+        <button
+          class="ghost"
+          onclick={async () => {
+            const fn = confirmDialog!.onCancel;
+            confirmDialog = null;
+            if (fn) await fn();
+          }}
+        >
+          {confirmDialog.cancelLabel ?? "Cancel"}
         </button>
         <button
-          class="primary danger"
+          class={confirmDialog.confirmClass ?? "primary danger"}
           onclick={async () => {
             const fn = confirmDialog!.onConfirm;
             confirmDialog = null;
@@ -713,6 +842,60 @@
           {confirmDialog.confirmLabel}
         </button>
       </div>
+    </div>
+  </div>
+{/if}
+
+<!-- macOS Services-onboarding hint. State machine in script:
+       idle    — initial copy + two buttons
+       waiting — kept open after Open Settings click; auto-detects when
+                 the user actually ticks the box, then closes itself. -->
+{#if macosHint.phase !== "closed"}
+  <div
+    class="modal-backdrop"
+    role="presentation"
+    onclick={macosHintDismiss}
+  >
+    <div
+      class="modal"
+      role="alertdialog"
+      aria-labelledby="macos-hint-title"
+      aria-describedby="macos-hint-message"
+      onclick={(e) => e.stopPropagation()}
+    >
+      {#if macosHint.phase === "idle"}
+        <h3 id="macos-hint-title" class="modal-title">One more step on macOS</h3>
+        <p id="macos-hint-message" class="modal-message">
+          To send files to Offspring from Finder's right-click → Services
+          menu, enable <strong>"Offspring…"</strong> in System Settings →
+          Keyboard → Keyboard Shortcuts → Services → Files and Folders.
+          macOS hides newly-installed Services entries by default.
+        </p>
+        <div class="modal-actions">
+          <button class="ghost" onclick={macosHintDismiss}>
+            I'll do it later
+          </button>
+          <button class="primary" onclick={macosHintOpenSettings}>
+            Open Services Settings
+          </button>
+        </div>
+      {:else if macosHint.phase === "waiting"}
+        <h3 id="macos-hint-title" class="modal-title">Waiting for you to enable Offspring…</h3>
+        <p id="macos-hint-message" class="modal-message">
+          In the System Settings window that just opened, scroll to
+          <strong>Files and Folders</strong> and tick the box next to
+          <strong>"Offspring…"</strong>. This dialog will close
+          automatically once it's enabled.
+        </p>
+        <div class="modal-actions">
+          <button class="ghost" onclick={macosHintDismiss}>
+            Close
+          </button>
+          <button class="primary" onclick={checkMacosServiceEnabled}>
+            Check now
+          </button>
+        </div>
+      {/if}
     </div>
   </div>
 {/if}
@@ -1612,10 +1795,30 @@
         <div class="card">
           <h3>Finder integration</h3>
           <p class="muted tiny" style="margin-top: 6px;">
-            Finder right-click integration on macOS is coming in a
-            future update. For now, drag files onto the Offspring
-            window to queue them for conversion.
+            Right-click any video, image, or audio file in Finder and
+            pick <strong>Services → Offspring…</strong> to send it
+            here. macOS hides newly-installed Services entries by
+            default — if you don't see Offspring in the Services
+            submenu, enable it under System Settings → Keyboard →
+            Keyboard Shortcuts → Services → Files and Folders.
           </p>
+          <div style="margin-top: 12px; display: flex; gap: 8px; flex-wrap: wrap;">
+            <button
+              class="primary"
+              onclick={async () => {
+                try {
+                  await api.openExternalUrl(
+                    "x-apple.systempreferences:com.apple.preference.keyboard?Services",
+                  );
+                } catch (err) { alert(String(err)); }
+              }}
+            >
+              Open Services Settings
+            </button>
+            <button class="ghost" onclick={showMacosServicesHint}>
+              Show the hint again
+            </button>
+          </div>
         </div>
       {:else if isStudio}
         <div class="card">

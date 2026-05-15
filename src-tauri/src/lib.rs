@@ -172,6 +172,7 @@ pub fn run() {
             commands::open_log_folder,
             commands::open_external_url,
             commands::cancel_encode,
+            commands::is_macos_service_enabled,
             commands::pick_watermark_file,
             commands::encode,
             commands::encode_merge,
