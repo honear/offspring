@@ -102,9 +102,16 @@ fn read_file_paths(pboard: &NSPasteboard) -> Vec<String> {
             return Vec::new();
         };
 
-        // NSArray<NSString>::iter yields &NSString. Convert each to
-        // an owned String via to_string (NSString → String).
-        plist.iter().map(|s| s.to_string()).collect()
+        // NSArray<NSString> in objc2-foundation 0.2 doesn't expose
+        // .iter() directly on Retained<…>. Use the underlying
+        // count + objectAtIndex: ObjC selectors via msg_send.
+        let count: usize = msg_send![&*plist, count];
+        let mut result = Vec::with_capacity(count);
+        for i in 0..count {
+            let s: Retained<NSString> = msg_send_id![&*plist, objectAtIndex: i];
+            result.push(s.to_string());
+        }
+        result
     }
 }
 
