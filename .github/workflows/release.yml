@@ -219,7 +219,11 @@ jobs:
           chmod 600 "$key_path"
 
           # macos-latest ships pwsh — same script as Windows uses.
-          pwsh tools/sign-release.ps1 -Tool rsign -KeyPath "$key_path" -Files @("$DMG_PATH")
+          # PowerShell auto-promotes a single string to a one-element
+          # array for [string[]] params, so we pass $DMG_PATH directly
+          # without the @(...) wrapper that bash would try to parse as
+          # a subshell.
+          pwsh tools/sign-release.ps1 -Tool rsign -KeyPath "$key_path" -Files "$DMG_PATH"
 
           rm -f "$key_path"
 
