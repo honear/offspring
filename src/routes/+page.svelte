@@ -1883,10 +1883,7 @@
 
           <div style="margin-top: 8px; padding-top: 10px; border-top: 1px solid var(--border, #2a2a2a);">
             <p class="muted tiny" style="margin: 0 0 8px 0;">
-              If the modern menu entries aren't showing up, or you're a
-              second Windows user on a shared PC, click below to
-              re-import the shell-extension certificate and re-register
-              the modern-menu package for your user (no admin required).
+              If the Windows 11 right-click menu entries aren't showing up, click below to re-register the modern-menu package for your user (no admin required).
             </p>
             <button
               onclick={async () => {
@@ -1901,7 +1898,7 @@
                 }
               }}
             >
-              Reinstall Windows 11 modern menu
+              Reinstall Windows 11 "Right-click menu" item 
             </button>
           </div>
         </div>
